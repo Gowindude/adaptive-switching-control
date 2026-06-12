@@ -40,14 +40,23 @@ Pm = solve_continuous_are(Am, Bm, Q_lqr, R_lqr)
 K = 0.5 * np.linalg.inv(R_lqr) @ Bm.T @ Pm
 
 def getArrControlled(x0, dt, T, A, K):
+    xm = x0
+    eta = np.zeros((lenT, x0.shape[0]))
+    arr_m = np.zeros((lenT, x0.shape[0]))
+    arr_m[0] = xm
+    
     arr = np.zeros((lenT, x0.shape[0]))
     arr[0] = x0
     x = x0
     for i in range(1, lenT):
         u = -K @ x
-        x_dot = A @ x + Bm @ u
-        x = x + x_dot * dt
+        x_dot = A@x + Bm@u
+        x = x + (x_dot) * dt
+        xm_dot = Am@x + Bm@u
+        xm = xm + (xm_dot) * dt
         arr[i] = x
+        arr_m[i] = xm
+        eta[i] = x - xm
     return arr
 
 
