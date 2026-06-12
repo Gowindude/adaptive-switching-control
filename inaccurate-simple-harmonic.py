@@ -37,7 +37,7 @@ Q_lqr = np.diag([1, 0.1, 1, 0.25])
 R_lqr = 0.2 * np.eye(2)
 
 Pm = solve_continuous_are(Am, Bm, Q_lqr, R_lqr)
-K = 0.5 * np.linalg.inv(R_lqr) @ Bm.T @ Pm
+K = np.linalg.inv(R_lqr) @ Bm.T @ Pm
 
 def getArrControlled(x0, dt, T, A, K):
     xm = x0
@@ -51,17 +51,18 @@ def getArrControlled(x0, dt, T, A, K):
     for i in range(1, lenT):
         u = -K @ x
         x_dot = A@x + Bm@u
+        xm_dot = Am@xm + Bm@u
         x = x + (x_dot) * dt
-        xm_dot = Am@x + Bm@u
         xm = xm + (xm_dot) * dt
         arr[i] = x
         arr_m[i] = xm
         eta[i] = x - xm
-    return arr
+    eta_norm = np.linalg.norm(eta, axis=1)
+    return arr, arr_m, eta, eta_norm
 
 
 arr_bare = getArr(x0, dt, T, A)
-arr_controlled = getArrControlled(x0, dt, T, A, K)
+arr_controlled, arr_m, eta, eta_norm = getArrControlled(x0, dt, T, A, K)
 t = np.arange(0, lenT)
 
 fig, axes = plt.subplots(2, 2)
@@ -76,5 +77,14 @@ for i in range(x0.shape[0]):
     axes[i].set_title(f'State {i+1}')
     axes[i].legend()
 
+plt.tight_layout()
+plt.show()
+
+plt.figure()
+plt.plot(t, eta_norm, label='Gap normed')
+plt.axhline(y=0, color='black', linewidth=0.5)
+plt.xlabel('Timestep')
+plt.ylabel('N value (normed)')
+plt.legend()
 plt.tight_layout()
 plt.show()
