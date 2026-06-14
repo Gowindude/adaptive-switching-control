@@ -1,0 +1,19 @@
+# Source material & derived artifacts
+Research Paper.pdf
+_paper_text.txt
+
+# Generated figures
+*.png
+
+# Editor / local config
+.vscode/
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude local memory & local-only docs (owner: keep these out of the repo)
+memory/
+CLAUDE.md
+RESEARCH-NOTES.md
