@@ -1,6 +1,7 @@
 from scipy.linalg import solve_continuous_are
 import numpy as np
 import matplotlib.pyplot as plt
+import math
 
 # Section 7.1.2 -- inaccurate model case.
 # True 2-DOF mass-spring-damper system.
@@ -56,41 +57,7 @@ K_tilde = np.linalg.inv(R_lqr) @ Bm.T @ P_tilde
 print("K_true:\n", K_true)
 print("K + K_tilde:\n", K + K_tilde)
 
-def phi_v(x):
-    x1 = x[0]
-    x2 = x[1]
-    x3 = x[2]
-    x4 = x[3]
 
-    arr = [x1**2, x1*x2, x1*x3, x1*x4, x2**2, x2*x3, x2*x4, x3**2, x3*x4, x4**2]
-    return np.array(arr)
-
-def collect_data(x_start, K, T_PE, dt):
-    x = x_start
-
-    freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
-    amp = 3
-    phase = 2.3
-    u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
-    amp * np.sum(np.sin(freqs * 0 + phase))])
-
-    N = int(T_PE/dt)
-    X = np.zeros((N, 4))
-    U_tilde = np.zeros((N, 2))
-    U_tilde[0] = u_tilde
-    X[0] = x
-
-    for i in range(1, N):
-        t = i * dt
-        u = -K @ x + u_tilde
-        x = x + (A @ x + Bm @ u) * dt
-        u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
-        amp * np.sum(np.sin(freqs * t + phase))])
-
-        U_tilde[i] = u_tilde
-        X[i] = x
-    return X, U_tilde
-        
 
 def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     xm = x0
@@ -140,12 +107,89 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     eta_norm = np.linalg.norm(eta, axis=1)
     return arr, arr_m, eta, eta_norm, t_s, thresh_arr
 
+def phi_v(x):
+    x1 = x[0]
+    x2 = x[1]
+    x3 = x[2]
+    x4 = x[3]
+
+    arr = [x1**2, x1*x2, x1*x3, x1*x4, x2**2, x2*x3, x2*x4, x3**2, x3*x4, x4**2]
+    return np.array(arr)
+
+def collect_data(x_start, K, T_PE, dt):
+    x = x_start
+
+    freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
+    amp = 3
+    phase = 2.3
+    u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
+    amp * np.sum(np.sin(freqs * 0 + phase))])
+
+    N = int(T_PE/dt)
+    X = np.zeros((N, 4))
+    U_tilde = np.zeros((N, 2))
+    U_tilde[0] = u_tilde
+    X[0] = x
+
+    for i in range(1, N):
+        t = i * dt
+        u = -K @ x + u_tilde
+        x = x + (A @ x + Bm @ u) * dt
+        u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
+        amp * np.sum(np.sin(freqs * t + phase))])
+
+        U_tilde[i] = u_tilde
+        X[i] = x
+    return X, U_tilde
+        
+def build_regression(X, U_tilde, K_i, W, dt):
+    rows = []
+    costs = []
+    k = 0
+    while k+W < len(X):
+        psi_v = phi_v(X[k+W]) - phi_v(X[k])
+        phi_cost = 0.0
+        psi_u = np.zeros(8)
+        for j in range(k, k+W):
+            xj = X[j]
+            mj = -K_i @ xj
+            diff = U_tilde[j] - mj
+            phi_cost += (xj @ Q_lqr @ xj + mj @ R_lqr @ mj) * dt
+            psi_u    += 2 * np.kron(diff @ R_lqr, xj) * dt
+        row = np.concatenate([psi_v, psi_u])
+        rows.append(row)
+        costs.append(phi_cost)
+
+        k += W
+    Psi = np.array(rows)
+    Phi = np.array(costs)
+    return Psi, Phi
+
+def policy_iteration(X, U_tilde, W, dt, eps=1e-6):
+    K_i = np.zeros((2, 4))
+    W_prev = 0
+    while True:
+        Psi, Phi = build_regression(X, U_tilde, K_i, W, dt)
+        W_hat = np.linalg.lstsq(Psi, -Phi, rcond =None)[0]
+        w_v = W_hat[:10]
+        w_u_vec = W_hat[10:]
+        w_u = w_u_vec.reshape(4, 2, order = 'F')
+        K_next = -w_u.T
+        K_i = K_next
+
+        if np.linalg.norm(W_hat - W_prev) < eps:
+            break
+        W_prev = W_hat
+    return K_i, w_v
 
 arr_bare = getArr(x0, dt, T, A)
 arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr = getArrControlled(x0, dt, T, A, K, Am)
 arr_mb, _, _, eta_norm_mb, _, thresh_mb = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
 X, U_tilde = collect_data(arr_controlled[t_s], K, 8.0, dt)
-print(X.shape, U_tilde.shape, np.isfinite(X).all(), np.abs(X).max())
+
+
+
+
 
 print("t_s =", None if t_s is None else f"{t_s * dt:.2f} s")
 
