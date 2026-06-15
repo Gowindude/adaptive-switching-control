@@ -56,6 +56,41 @@ K_tilde = np.linalg.inv(R_lqr) @ Bm.T @ P_tilde
 print("K_true:\n", K_true)
 print("K + K_tilde:\n", K + K_tilde)
 
+def phi_v(x):
+    x1 = x[0]
+    x2 = x[1]
+    x3 = x[2]
+    x4 = x[3]
+
+    arr = [x1**2, x1*x2, x1*x3, x1*x4, x2**2, x2*x3, x2*x4, x3**2, x3*x4, x4**2]
+    return np.array(arr)
+
+def collect_data(x_start, K, T_PE, dt):
+    x = x_start
+
+    freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
+    amp = 3
+    phase = 2.3
+    u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
+    amp * np.sum(np.sin(freqs * 0 + phase))])
+
+    N = int(T_PE/dt)
+    X = np.zeros((N, 4))
+    U_tilde = np.zeros((N, 2))
+    U_tilde[0] = u_tilde
+    X[0] = x
+
+    for i in range(1, N):
+        t = i * dt
+        u = -K @ x + u_tilde
+        x = x + (A @ x + Bm @ u) * dt
+        u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
+        amp * np.sum(np.sin(freqs * t + phase))])
+
+        U_tilde[i] = u_tilde
+        X[i] = x
+    return X, U_tilde
+        
 
 def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     xm = x0
@@ -109,39 +144,41 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
 arr_bare = getArr(x0, dt, T, A)
 arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr = getArrControlled(x0, dt, T, A, K, Am)
 arr_mb, _, _, eta_norm_mb, _, thresh_mb = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
+X, U_tilde = collect_data(arr_controlled[t_s], K, 8.0, dt)
+print(X.shape, U_tilde.shape, np.isfinite(X).all(), np.abs(X).max())
 
 print("t_s =", None if t_s is None else f"{t_s * dt:.2f} s")
 
 t = np.arange(0, lenT) * dt
 
 # states: switched composite vs model-based-only (switch helps -> curves diverge after t_s)
-fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-axes = axes.flatten()
-for i in range(x0.shape[0]):
-    axes[i].plot(t, arr_controlled[:, i], '--', label='switched', linewidth=0.8)
-    axes[i].plot(t, arr_mb[:, i], label='model-based')
-    if t_s is not None:
-        axes[i].axvline(t_s * dt, color='gray', linestyle=':', label='switch')
-    axes[i].axhline(0, color='black', linewidth=0.5)
-    axes[i].set_xlabel('Time (s)')
-    axes[i].set_ylabel(f'State {i+1}')
-    axes[i].legend(fontsize=8)
-    axes[i].set_xlim(0, 10)
-plt.tight_layout()
-plt.savefig('states.png', dpi=150)
-plt.show()
+# fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+# axes = axes.flatten()
+# for i in range(x0.shape[0]):
+#     axes[i].plot(t, arr_controlled[:, i], '--', label='switched', linewidth=0.8)
+#     axes[i].plot(t, arr_mb[:, i], label='model-based')
+#     if t_s is not None:
+#         axes[i].axvline(t_s * dt, color='gray', linestyle=':', label='switch')
+#     axes[i].axhline(0, color='black', linewidth=0.5)
+#     axes[i].set_xlabel('Time (s)')
+#     axes[i].set_ylabel(f'State {i+1}')
+#     axes[i].legend(fontsize=8)
+#     axes[i].set_xlim(0, 10)
+# plt.tight_layout()
+# plt.savefig('states.png', dpi=150)
+# plt.show()
 
-# model error vs threshold near the switch (reproduces Figure 3, bottom pane)
-plt.figure(figsize=(8, 5))
-plt.plot(t, eta_norm**2, label='||eta||^2')
-plt.plot(t, thresh_arr, label='threshold')
-if t_s is not None:
-    plt.axvline(t_s * dt, color='gray', linestyle=':', label=f'switch t_s = {t_s*dt:.2f}s')
-plt.xlabel('Time (s)')
-plt.ylabel('value')
-plt.xlim(0, 0.4)
-plt.ylim(0, 50)
-plt.legend()
-plt.tight_layout()
-plt.savefig('eta_threshold.png', dpi=150)
-plt.show()
+# # model error vs threshold near the switch (reproduces Figure 3, bottom pane)
+# plt.figure(figsize=(8, 5))
+# plt.plot(t, eta_norm**2, label='||eta||^2')
+# plt.plot(t, thresh_arr, label='threshold')
+# if t_s is not None:
+#     plt.axvline(t_s * dt, color='gray', linestyle=':', label=f'switch t_s = {t_s*dt:.2f}s')
+# plt.xlabel('Time (s)')
+# plt.ylabel('value')
+# plt.xlim(0, 0.4)
+# plt.ylim(0, 50)
+# plt.legend()
+# plt.tight_layout()
+# plt.savefig('eta_threshold.png', dpi=150)
+# plt.show()
