@@ -149,4 +149,4 @@ ax[2].set_xlim(0, 8)
 
 fig.suptitle('Figure 2 (Section 7.1.1): accurate model, no switch')
 plt.tight_layout()
-plt.savefig('figure2_accurate.png', dpi=150)
+plt.show()   # display Figure 2 interactively

@@ -293,9 +293,15 @@ arr_bare = getArr(x0, dt, T, A)
 arr_mb, _, _, eta_norm_mb, _, thresh_mb, _, _ = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
 
 # Single continuous trajectory: model-based -> switch -> probe/collect -> learned composite.
+# This run carries the inline PE probe -> use it for the control and model-error panes.
 (arr_controlled, arr_m, eta, eta_norm, thresh_arr, u_arr,
  t_s_idx, K_learned, w_v, X, U_tilde, history) = run_experiment(x0, dt, T, A, Am, K, Bm, 8.0, 10)
 t_s = t_s_idx
+
+# Deployed composite WITHOUT the probe (model-based -> switch -> -(K+K_tilde)x). The probe
+# injects exploration energy that masks the composite's ~18% regulation edge over model-based,
+# so the state-norm pane shows this clean deployment (the control pane keeps the probe). See OBS-6.
+arr_clean = getArrControlled(x0, dt, T, A, K, Am, allow_switch=True)[0]
 
 # RL validation: learned augmentation vs analytic ground truth ---
 # Actor must converge to K_tilde, critic to P_tilde (NOT K_true / P_true).
@@ -317,7 +323,7 @@ t = np.arange(0, lenT) * dt
 # Figure 3 (paper 7.1.2): norm of states (switched vs model-based-only),
 # control norm, and model error vs threshold. Gray line = switching moment t_s.
 
-state_norm = np.linalg.norm(arr_controlled, axis=1)   # ||x|| under switched controller
+state_norm = np.linalg.norm(arr_clean, axis=1)        # ||x|| under deployed composite (no probe)
 state_norm_mb = np.linalg.norm(arr_mb, axis=1)        # ||x|| under model-based only
 
 fig, ax = plt.subplots(3, 1, figsize=(8, 9))
@@ -325,11 +331,11 @@ fig, ax = plt.subplots(3, 1, figsize=(8, 9))
 # top + middle: full-horizon regulation story (||x||, ||u||) over the full 15 s sim
 x_min = 0.005 * np.linalg.norm(x0)   # switching guard (same as inside getArrControlled)
 
-ax[0].plot(t[1:], state_norm[1:], label='switched (composite)')
+ax[0].plot(t[1:], state_norm[1:], label='switched composite (deployed)')
 ax[0].plot(t[1:], state_norm_mb[1:], '--', label='model-based only')
 ax[0].axhline(x_min, color='black', linestyle=':', linewidth=0.8, label='x_min')
 ax[0].set_ylabel('||x||')
-ax[0].set_title('Norm of the states')
+ax[0].set_title('Norm of the states (deployed composite; probe excluded)')
 ax[0].legend(fontsize=8)
 ax[0].set_xlim(0, 15)
 
@@ -369,7 +375,6 @@ if t_s is not None:
     ax[2].axvline(t_s * dt, color='gray', linestyle=':')
 fig.suptitle('Figure 3 (Section 7.1.2): switched vs. model-based controller')
 plt.tight_layout()
-plt.savefig('figure3_inaccurate.png', dpi=150)
 
 # Figure 4 (paper 7.1.2): convergence of Algorithm-1 weights to the optimal
 # weights w* over policy-iteration steps. Floor at the O(dt) Euler error
@@ -383,4 +388,4 @@ plt.ylabel('|| w_hat_i - w* ||')
 plt.title('Figure 4 (7.1.2): weight error vs iteration')
 plt.grid(True, which='both', alpha=0.3)
 plt.tight_layout()
-plt.savefig('figure4_weights.png', dpi=150)
+plt.show()   # display Figure 3 and Figure 4 interactively
