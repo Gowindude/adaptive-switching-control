@@ -70,6 +70,8 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     x = x0
 
     thresh_arr = np.zeros(lenT)
+    u_norm_arr = np.zeros(lenT)
+    u_arr = np.zeros((lenT, 2))
 
     lam_min_Q = np.min(np.diag(Q_lqr))
     lam_min_R = np.min(np.diag(R_lqr))
@@ -92,6 +94,8 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
         u_norm = np.linalg.norm(u)
         threshold = (1 / (xi**2 * lam_max_R)) * (lam_min_Q * x_norm**2 + lam_min_R * u_norm**2)
         thresh_arr[i] = threshold
+        u_norm_arr[i] = np.linalg.norm(u)
+        u_arr[i] = u
 
         if not switched and eta_norm_sq >= threshold and x_norm > x_min and allow_switch:
             switched = True
@@ -105,7 +109,7 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
         arr_m[i] = xm
         eta[i] = x - xm
     eta_norm = np.linalg.norm(eta, axis=1)
-    return arr, arr_m, eta, eta_norm, t_s, thresh_arr
+    return arr, arr_m, eta, eta_norm, t_s, thresh_arr, u_norm_arr, u_arr
 
 def phi_v(x):
     x1 = x[0]
@@ -168,6 +172,7 @@ def build_regression(X, U_tilde, K_i, W, dt):
 def policy_iteration(X, U_tilde, W, dt, eps=1e-6):
     K_i = np.zeros((2, 4))
     W_prev = 0
+    history = []
     while True:
         Psi, Phi = build_regression(X, U_tilde, K_i, W, dt)
         W_hat = np.linalg.lstsq(Psi, -Phi, rcond =None)[0]
@@ -176,53 +181,124 @@ def policy_iteration(X, U_tilde, W, dt, eps=1e-6):
         w_u = w_u_vec.reshape(4, 2, order = 'F')
         K_next = -w_u.T
         K_i = K_next
-
+        history.append(W_hat)
         if np.linalg.norm(W_hat - W_prev) < eps:
             break
         W_prev = W_hat
-    return K_i, w_v
+    return K_i, w_v, history
+
+def P_from_wv(w_v):
+    P = np.zeros((4, 4))
+    idx = 0
+    for i in range(4):
+        for j in range(i, 4):
+            if i == j:
+                P[i, i] = w_v[idx]
+            elif i < j:
+                P[i, j] = w_v[idx]/2
+                P[j, i] = w_v[idx]/2
+            idx += 1
+    return P
+
+def inverseP_from_wv(K_tilde, P_tilde):
+    w_u_vec_star = (-K_tilde.T).flatten(order='F')
+    w_v_star = np.zeros(10)
+    idx = 0
+    for i in range(4):
+        for j in range(i, 4):
+            if i == j:
+                w_v_star[idx] = P_tilde[i, i]
+            elif i < j:
+                w_v_star[idx] = 2 * P_tilde[i, j]
+            idx += 1
+    w_star = np.concatenate([w_v_star, w_u_vec_star])
+    return w_star
 
 arr_bare = getArr(x0, dt, T, A)
-arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr = getArrControlled(x0, dt, T, A, K, Am)
-arr_mb, _, _, eta_norm_mb, _, thresh_mb = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
+arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr, u_norm_arr, u_arr = getArrControlled(x0, dt, T, A, K, Am)
+arr_mb, _, _, eta_norm_mb, _, thresh_mb, _, _ = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
 X, U_tilde = collect_data(arr_controlled[t_s], K, 8.0, dt)
 
+# RL validation: learned augmentation vs analytic ground truth ---
+# Actor must converge to K_tilde, critic to P_tilde (NOT K_true / P_true).
+# Residual gap is forward-Euler / Riemann-sum discretization error (O(dt)).
+K_learned, w_v, history = policy_iteration(X, U_tilde, 10, dt, eps=1e-6)
+P_learned = P_from_wv(w_v)
 
+K_max_err = np.abs(K_learned - K_tilde).max()
+K_rel_err = np.linalg.norm(K_learned - K_tilde) / np.linalg.norm(K_tilde)
+P_max_err = np.abs(P_learned - P_tilde).max()
+P_rel_err = np.linalg.norm(P_learned - P_tilde) / np.linalg.norm(P_tilde)
 
-
+print(f"actor:  max|K_learned - K_tilde| = {K_max_err:.4f}   rel = {K_rel_err*100:.2f}%")
+print(f"critic: max|P_learned - P_tilde| = {P_max_err:.4f}   rel = {P_rel_err*100:.2f}%")
 
 print("t_s =", None if t_s is None else f"{t_s * dt:.2f} s")
 
 t = np.arange(0, lenT) * dt
 
-# states: switched composite vs model-based-only (switch helps -> curves diverge after t_s)
-# fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-# axes = axes.flatten()
-# for i in range(x0.shape[0]):
-#     axes[i].plot(t, arr_controlled[:, i], '--', label='switched', linewidth=0.8)
-#     axes[i].plot(t, arr_mb[:, i], label='model-based')
-#     if t_s is not None:
-#         axes[i].axvline(t_s * dt, color='gray', linestyle=':', label='switch')
-#     axes[i].axhline(0, color='black', linewidth=0.5)
-#     axes[i].set_xlabel('Time (s)')
-#     axes[i].set_ylabel(f'State {i+1}')
-#     axes[i].legend(fontsize=8)
-#     axes[i].set_xlim(0, 10)
-# plt.tight_layout()
-# plt.savefig('states.png', dpi=150)
-# plt.show()
+# Figure 3 (paper 7.1.2): norm of states (switched vs model-based-only),
+# control norm, and model error vs threshold. Gray line = switching moment t_s.
 
-# # model error vs threshold near the switch (reproduces Figure 3, bottom pane)
-# plt.figure(figsize=(8, 5))
-# plt.plot(t, eta_norm**2, label='||eta||^2')
-# plt.plot(t, thresh_arr, label='threshold')
-# if t_s is not None:
-#     plt.axvline(t_s * dt, color='gray', linestyle=':', label=f'switch t_s = {t_s*dt:.2f}s')
-# plt.xlabel('Time (s)')
-# plt.ylabel('value')
-# plt.xlim(0, 0.4)
-# plt.ylim(0, 50)
-# plt.legend()
-# plt.tight_layout()
-# plt.savefig('eta_threshold.png', dpi=150)
-# plt.show()
+state_norm = np.linalg.norm(arr_controlled, axis=1)   # ||x|| under switched controller
+state_norm_mb = np.linalg.norm(arr_mb, axis=1)        # ||x|| under model-based only
+
+fig, ax = plt.subplots(3, 1, figsize=(8, 9))
+
+# top + middle: full-horizon regulation story (||x||, ||u||) over the full 15 s sim
+x_min = 0.005 * np.linalg.norm(x0)   # switching guard (same as inside getArrControlled)
+
+ax[0].plot(t[1:], state_norm[1:], label='switched (composite)')
+ax[0].plot(t[1:], state_norm_mb[1:], '--', label='model-based only')
+ax[0].axhline(x_min, color='black', linestyle=':', linewidth=0.8, label='x_min')
+ax[0].set_ylabel('||x||')
+ax[0].set_title('Norm of the states')
+ax[0].legend(fontsize=8)
+ax[0].set_xlim(0, 15)
+
+# control components u1, u2 (paper plots both). NOTE: smooth here because the PE
+# probe lives in the separate collect_data() run, not in this deployed trajectory;
+# the paper injects the probe inline, hence its oscillatory control during learning.
+ax[1].plot(t[1:], u_arr[1:, 0], label='u1')
+ax[1].plot(t[1:], u_arr[1:, 1], label='u2')
+ax[1].set_ylabel('u')
+ax[1].set_xlabel('Time (s)')
+ax[1].set_title('Control (deployed run; probe is separate -> no ripple)')
+ax[1].legend(fontsize=8)
+ax[1].set_xlim(0, 15)
+
+# bottom: model error vs threshold, zoomed to the switching window. eta is a
+# pre-switch monitor only; it diverges after t_s (model run on bad A_m), so we
+# show just the crossing that triggers the switch
+ax[2].plot(t[1:], eta_norm[1:]**2, label='||eta||^2')
+ax[2].plot(t[1:], thresh_arr[1:], label='threshold')
+ax[2].set_ylabel('model error')
+ax[2].set_xlabel('Time (s)')
+ax[2].set_title('Norm of the model error vs. threshold (zoom near switch)')
+ax[2].set_xlim(0, 0.5)
+ax[2].set_ylim(0, 60)
+ax[2].legend(fontsize=8)
+
+for a in (ax[0], ax[1]):
+    if t_s is not None:
+        a.axvline(t_s * dt, color='gray', linestyle=':')
+if t_s is not None:
+    ax[2].axvline(t_s * dt, color='gray', linestyle=':', label=f't_s = {t_s*dt:.2f} s')
+    ax[2].legend(fontsize=8)
+fig.suptitle('Figure 3 (Section 7.1.2): switched vs. model-based controller')
+plt.tight_layout()
+plt.savefig('figure3_inaccurate.png', dpi=150)
+
+# Figure 4 (paper 7.1.2): convergence of Algorithm-1 weights to the optimal
+# weights w* over policy-iteration steps. Floor at the O(dt) Euler error
+w_star = inverseP_from_wv(K_tilde, P_tilde)
+errs = [np.linalg.norm(w - w_star) for w in history]
+
+plt.figure(figsize=(7, 5))
+plt.semilogy(range(len(errs)), errs, 'o-')
+plt.xlabel('Algorithm 1 iteration i')
+plt.ylabel('|| w_hat_i - w* ||')
+plt.title('Figure 4 (7.1.2): weight error vs iteration')
+plt.grid(True, which='both', alpha=0.3)
+plt.tight_layout()
+plt.savefig('figure4_weights.png', dpi=150)
