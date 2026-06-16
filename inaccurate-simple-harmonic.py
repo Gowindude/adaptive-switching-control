@@ -124,32 +124,35 @@ def phi_v(x):
     arr = [x1**2, x1*x2, x1*x3, x1*x4, x2**2, x2*x3, x2*x4, x3**2, x3*x4, x4**2]
     return np.array(arr)
 
-def collect_data(x_start, K, T_PE, dt):
-    x = x_start
+# SUPERSEDED by run_experiment(): the PE probe is now injected inline during the
+# [t_s, t_s+T_PE] window of the single deployed trajectory (one source of truth for
+# both the control plot and the RL training data). Kept here for reference only.
+# def collect_data(x_start, K, T_PE, dt):
+#     x = x_start
+#
+#     freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
+#     amp = 3
+#     phase = 2.3
+#     u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
+#     amp * np.sum(np.sin(freqs * 0 + phase))])
+#
+#     N = int(T_PE/dt)
+#     X = np.zeros((N, 4))
+#     U_tilde = np.zeros((N, 2))
+#     U_tilde[0] = u_tilde
+#     X[0] = x
+#
+#     for i in range(1, N):
+#         t = i * dt
+#         u = -K @ x + u_tilde
+#         x = x + (A @ x + Bm @ u) * dt
+#         u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
+#         amp * np.sum(np.sin(freqs * t + phase))])
+#
+#         U_tilde[i] = u_tilde
+#         X[i] = x
+#     return X, U_tilde
 
-    freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
-    amp = 3
-    phase = 2.3
-    u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
-    amp * np.sum(np.sin(freqs * 0 + phase))])
-
-    N = int(T_PE/dt)
-    X = np.zeros((N, 4))
-    U_tilde = np.zeros((N, 2))
-    U_tilde[0] = u_tilde
-    X[0] = x
-
-    for i in range(1, N):
-        t = i * dt
-        u = -K @ x + u_tilde
-        x = x + (A @ x + Bm @ u) * dt
-        u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
-        amp * np.sum(np.sin(freqs * t + phase))])
-
-        U_tilde[i] = u_tilde
-        X[i] = x
-    return X, U_tilde
-        
 def build_regression(X, U_tilde, K_i, W, dt):
     rows = []
     costs = []
@@ -218,15 +221,85 @@ def inverseP_from_wv(K_tilde, P_tilde):
     w_star = np.concatenate([w_v_star, w_u_vec_star])
     return w_star
 
+def run_experiment(x0, dt, T, A, Am, K, Bm, T_PE, W):
+    """One continuous trajectory reproducing the paper's experiment:
+      phase 1 [0, t_s)        : model-based  u = -K x          (smooth)
+      phase 2 [t_s, t_s+T_PE) : behavior     u = -K x + probe  (PE excitation -> collect data)
+      phase 3 [t_s+T_PE, T)   : composite    u = -(K + K_learned) x
+    The probe segment IS the data fed to policy_iteration -- one source of truth, so the
+    oscillatory control pane and the RL training set are the same trajectory."""
+    lenT = int(T / dt)
+    arr = np.zeros((lenT, 4)); arr[0] = x0
+    arr_m = np.zeros((lenT, 4)); arr_m[0] = x0
+    eta = np.zeros((lenT, 4))
+    thresh_arr = np.zeros(lenT)
+    u_arr = np.zeros((lenT, 2))
+
+    lam_max_Q = np.max(np.diag(Q_lqr))   # paper's figures use MAX(Q); Eq.17 writes MIN -- see OBS-5
+    lam_min_R = np.min(np.diag(R_lqr))
+    lam_max_R = np.max(np.diag(R_lqr))
+    xi = 1.35
+    x_min = 0.005 * np.linalg.norm(x0)
+
+    freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3]); amp = 6; phase = 2.3   # amp sized to paper's control envelope
+    def probe(tau):
+        return np.array([amp * np.sum(np.sin(freqs * tau)),
+                         amp * np.sum(np.sin(freqs * tau + phase))])
+
+    N_PE = int(T_PE / dt)
+    X_data = np.zeros((N_PE, 4)); U_data = np.zeros((N_PE, 2))
+
+    x = x0.astype(float).copy(); xm = x0.astype(float).copy()
+    t_s = None; collect_start = None
+    K_learned = None; w_v = None; history = None
+
+    for i in range(1, lenT):
+        # switching test (phase 1 only), evaluated on the model-based control
+        if collect_start is None:
+            u_m = -K @ x
+            thr = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * np.linalg.norm(x)**2
+                                               + lam_min_R * np.linalg.norm(u_m)**2)
+            if np.linalg.norm(x - xm)**2 >= thr and np.linalg.norm(x) > x_min:
+                t_s = i; collect_start = i
+
+        # control for this step
+        if collect_start is None:
+            u = -K @ x
+        elif (i - collect_start) < N_PE:
+            k = i - collect_start
+            ut = probe(k * dt)
+            u = -K @ x + ut
+            X_data[k] = x          # state at collection step k
+            U_data[k] = ut         # augmentation (probe) applied at X_data[k] going forward
+        else:
+            u = -(K + K_learned) @ x
+
+        thresh_arr[i] = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * np.linalg.norm(x)**2
+                                                     + lam_min_R * np.linalg.norm(u)**2)
+        u_arr[i] = u
+
+        # learn once the collection window is full (used from the next step on)
+        if collect_start is not None and (i - collect_start) == N_PE - 1 and K_learned is None:
+            K_learned, w_v, history = policy_iteration(X_data, U_data, W, dt)
+
+        x = x + (A @ x + Bm @ u) * dt
+        xm = xm + (Am @ xm + Bm @ u) * dt
+        arr[i] = x; arr_m[i] = xm; eta[i] = x - xm
+
+    eta_norm = np.linalg.norm(eta, axis=1)
+    return arr, arr_m, eta, eta_norm, thresh_arr, u_arr, t_s, K_learned, w_v, X_data, U_data, history
+
 arr_bare = getArr(x0, dt, T, A)
-arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr, u_norm_arr, u_arr = getArrControlled(x0, dt, T, A, K, Am)
 arr_mb, _, _, eta_norm_mb, _, thresh_mb, _, _ = getArrControlled(x0, dt, T, A, K, Am, allow_switch=False)
-X, U_tilde = collect_data(arr_controlled[t_s], K, 8.0, dt)
+
+# Single continuous trajectory: model-based -> switch -> probe/collect -> learned composite.
+(arr_controlled, arr_m, eta, eta_norm, thresh_arr, u_arr,
+ t_s_idx, K_learned, w_v, X, U_tilde, history) = run_experiment(x0, dt, T, A, Am, K, Bm, 8.0, 10)
+t_s = t_s_idx
 
 # RL validation: learned augmentation vs analytic ground truth ---
 # Actor must converge to K_tilde, critic to P_tilde (NOT K_true / P_true).
 # Residual gap is forward-Euler / Riemann-sum discretization error (O(dt)).
-K_learned, w_v, history = policy_iteration(X, U_tilde, 10, dt, eps=1e-6)
 P_learned = P_from_wv(w_v)
 
 K_max_err = np.abs(K_learned - K_tilde).max()
@@ -260,35 +333,40 @@ ax[0].set_title('Norm of the states')
 ax[0].legend(fontsize=8)
 ax[0].set_xlim(0, 15)
 
-# control components u1, u2 (paper plots both). NOTE: smooth here because the PE
-# probe lives in the separate collect_data() run, not in this deployed trajectory;
-# the paper injects the probe inline, hence its oscillatory control during learning.
-ax[1].plot(t[1:], u_arr[1:, 0], label='u1')
-ax[1].plot(t[1:], u_arr[1:, 1], label='u2')
+# control components u1, u2: oscillatory during [t_s, t_s+T_PE] -- the persistent-
+# excitation probe injected inline for data collection -- then smooth composite.
+ax[1].plot(t[1:], u_arr[1:, 0], label='u1', linewidth=0.7)
+ax[1].plot(t[1:], u_arr[1:, 1], label='u2', linewidth=0.7)
 ax[1].set_ylabel('u')
 ax[1].set_xlabel('Time (s)')
-ax[1].set_title('Control (deployed run; probe is separate -> no ripple)')
+ax[1].set_title('Control (probe excitation during learning, then composite)')
 ax[1].legend(fontsize=8)
 ax[1].set_xlim(0, 15)
 
-# bottom: model error vs threshold, zoomed to the switching window. eta is a
-# pre-switch monitor only; it diverges after t_s (model run on bad A_m), so we
-# show just the crossing that triggers the switch
+# bottom: model error vs threshold over the FULL run (eta diverges to ~1e100 after
+# t_s on the unstable A_m -- matches the paper's x10^100 axis), with an inset zoomed
+# to the switching window showing ||eta||^2 crossing the threshold at t_s.
 ax[2].plot(t[1:], eta_norm[1:]**2, label='||eta||^2')
 ax[2].plot(t[1:], thresh_arr[1:], label='threshold')
 ax[2].set_ylabel('model error')
 ax[2].set_xlabel('Time (s)')
-ax[2].set_title('Norm of the model error vs. threshold (zoom near switch)')
-ax[2].set_xlim(0, 0.5)
-ax[2].set_ylim(0, 60)
-ax[2].legend(fontsize=8)
+ax[2].set_title('Norm of the model error vs. threshold (full run + zoom)')
+ax[2].set_xlim(0, 15)
+ax[2].legend(fontsize=8, loc='upper left')
+
+axin = ax[2].inset_axes([0.30, 0.30, 0.45, 0.6])   # inset on the switching window
+axin.plot(t[1:], eta_norm[1:]**2)
+axin.plot(t[1:], thresh_arr[1:])
+axin.set_xlim(0.04, 0.4)
+axin.set_ylim(0, 1300)
+if t_s is not None:
+    axin.axvline(t_s * dt, color='gray', linestyle=':')
 
 for a in (ax[0], ax[1]):
     if t_s is not None:
         a.axvline(t_s * dt, color='gray', linestyle=':')
 if t_s is not None:
-    ax[2].axvline(t_s * dt, color='gray', linestyle=':', label=f't_s = {t_s*dt:.2f} s')
-    ax[2].legend(fontsize=8)
+    ax[2].axvline(t_s * dt, color='gray', linestyle=':')
 fig.suptitle('Figure 3 (Section 7.1.2): switched vs. model-based controller')
 plt.tight_layout()
 plt.savefig('figure3_inaccurate.png', dpi=150)
