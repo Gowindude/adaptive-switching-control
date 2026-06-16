@@ -61,8 +61,13 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     x = x0
 
     thresh_arr = np.zeros(lenT)
+    u_norm_arr = np.zeros(lenT)
+    u_arr = np.zeros((lenT, 2))
 
-    lam_min_Q = np.min(np.diag(Q_lqr))
+    # Numerator uses lam_MAX(Q) to match the paper's implementation (threshold ~ 120).
+    # NOTE: Theorem 1's *proof* (Eq. 17 deriv.) rigorously supports lam_min(Q) -- the
+    # paper's experiments use the looser lam_max(Q). See RESEARCH-NOTES OBS-2 / OBS-5.
+    lam_max_Q = np.max(np.diag(Q_lqr))
     lam_min_R = np.min(np.diag(R_lqr))
     lam_max_R = np.max(np.diag(R_lqr))
     xi = 1.35
@@ -81,8 +86,10 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
         eta_norm_sq = np.linalg.norm(eta_now)**2
         x_norm = np.linalg.norm(x)
         u_norm = np.linalg.norm(u)
-        threshold = (1 / (xi**2 * lam_max_R)) * (lam_min_Q * x_norm**2 + lam_min_R * u_norm**2)
+        threshold = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * x_norm**2 + lam_min_R * u_norm**2)
         thresh_arr[i] = threshold
+        u_norm_arr[i] = u_norm
+        u_arr[i] = u
 
         if not switched and eta_norm_sq >= threshold and x_norm > x_min and allow_switch:
             switched = True
@@ -96,37 +103,50 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
         arr_m[i] = xm
         eta[i] = x - xm
     eta_norm = np.linalg.norm(eta, axis=1)
-    return arr, arr_m, eta, eta_norm, t_s, thresh_arr
+    return arr, arr_m, eta, eta_norm, t_s, thresh_arr, u_norm_arr, u_arr
 
 
 arr_bare = getArr(x0, dt, T, A)
-arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr = getArrControlled(x0, dt, T, A, K, Am)
+arr_controlled, arr_m, eta, eta_norm, t_s, thresh_arr, u_norm_arr, u_arr = getArrControlled(x0, dt, T, A, K, Am)
 
 print("t_s =", t_s, "(expected None: accurate model regulates without switching)")
 
 t = np.arange(0, lenT) * dt
 
-# states: uncontrolled baseline vs model-based controller (regulates to origin, no switch)
-fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-axes = axes.flatten()
-for i in range(x0.shape[0]):
-    axes[i].plot(t, arr_bare[:, i], '--', label='uncontrolled', linewidth=0.8)
-    axes[i].plot(t, arr_controlled[:, i], label='model-based')
-    axes[i].axhline(0, color='black', linewidth=0.5)
-    axes[i].set_xlabel('Time (s)')
-    axes[i].set_ylabel(f'State {i+1}')
-    axes[i].legend(fontsize=8)
-plt.tight_layout()
-plt.savefig('states_accurate.png', dpi=150)
-plt.show()
+# ============================================================================
+# Figure 2 (paper 7.1.1, accurate model): norm of states, control components,
+# and model error vs threshold. The model-based controller runs the whole time:
+# ||eta||^2 stays UNDER the threshold, so the switch never fires (t_s = None).
+# ============================================================================
+state_norm = np.linalg.norm(arr_controlled, axis=1)
+x_min = 0.005 * np.linalg.norm(x0)   # switching guard (same as inside getArrControlled)
 
-# model error vs threshold: ||eta||^2 stays under -> no switch (reproduces Figure 2)
-plt.figure(figsize=(8, 5))
-plt.plot(t, eta_norm**2, label='||eta||^2')
-plt.plot(t, thresh_arr, label='threshold')
-plt.xlabel('Time (s)')
-plt.ylabel('value')
-plt.legend()
+fig, ax = plt.subplots(3, 1, figsize=(8, 9))
+
+ax[0].plot(t[1:], state_norm[1:], label='model-based')
+ax[0].axhline(x_min, color='black', linestyle=':', linewidth=0.8, label='x_min')
+ax[0].set_ylabel('||x||')
+ax[0].set_title('Norm of the states')
+ax[0].legend(fontsize=8)
+ax[0].set_xlim(0, 8)
+
+ax[1].plot(t[1:], u_arr[1:, 0], label='u1')
+ax[1].plot(t[1:], u_arr[1:, 1], label='u2')
+ax[1].set_ylabel('u')
+ax[1].set_xlabel('Time (s)')
+ax[1].set_title('Control')
+ax[1].legend(fontsize=8)
+ax[1].set_xlim(0, 8)
+
+# model error stays below threshold for all t -> no switch (the whole point of case 1)
+ax[2].plot(t[1:], eta_norm[1:]**2, label='||eta||^2')
+ax[2].plot(t[1:], thresh_arr[1:], label='threshold')
+ax[2].set_ylabel('model error')
+ax[2].set_xlabel('Time (s)')
+ax[2].set_title('Norm of the model error vs. threshold (never crosses)')
+ax[2].legend(fontsize=8)
+ax[2].set_xlim(0, 8)
+
+fig.suptitle('Figure 2 (Section 7.1.1): accurate model, no switch')
 plt.tight_layout()
-plt.savefig('eta_threshold_accurate.png', dpi=150)
-plt.show()
+plt.savefig('figure2_accurate.png', dpi=150)

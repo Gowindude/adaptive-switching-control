@@ -73,7 +73,11 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
     u_norm_arr = np.zeros(lenT)
     u_arr = np.zeros((lenT, 2))
 
-    lam_min_Q = np.min(np.diag(Q_lqr))
+    # Numerator uses lam_MAX(Q) to match the paper's implementation (gives
+    # t_s ~ 0.25 s and threshold ~ 120). NOTE: Theorem 1's *proof* (Eq. 17 deriv.)
+    # rigorously supports lam_min(Q) -- the paper's experiments use the looser
+    # lam_max(Q). See RESEARCH-NOTES OBS-2 / OBS-5.
+    lam_max_Q = np.max(np.diag(Q_lqr))
     lam_min_R = np.min(np.diag(R_lqr))
     lam_max_R = np.max(np.diag(R_lqr))
     xi = 1.35
@@ -92,7 +96,7 @@ def getArrControlled(x0, dt, T, A, K, A_m, allow_switch=True):
         eta_norm_sq = np.linalg.norm(eta_now)**2
         x_norm = np.linalg.norm(x)
         u_norm = np.linalg.norm(u)
-        threshold = (1 / (xi**2 * lam_max_R)) * (lam_min_Q * x_norm**2 + lam_min_R * u_norm**2)
+        threshold = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * x_norm**2 + lam_min_R * u_norm**2)
         thresh_arr[i] = threshold
         u_norm_arr[i] = np.linalg.norm(u)
         u_arr[i] = u
