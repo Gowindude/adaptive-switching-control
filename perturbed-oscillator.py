@@ -102,7 +102,7 @@ def run_experiment(x0, rho, T, dt, K, T_PE, W):
 
         # learn once PE window is full
         if collect_start is not None and (i - collect_start) == N_PE - 1 and w_u is None:
-            pass  # TODO: w_v, w_u, history = policy_iteration(X_data, U_data, W, dt)
+            w_u, w_v, history = policy_iteration(X_data, U_data, W, dt)
 
         x  = x  + (f(x, rho)  + g(x, rho)  * u)  * dt   # true nonlinear system
         xm = xm + (Am @ xm + Bm.flatten() * u_m) * dt   # linear model
@@ -133,5 +133,21 @@ def build_regression(X_data, U_data, w_u_i, W, R_scalar, dt):
     Phi = np.array(costs)
     return Psi, Phi
 
-arr, arr_m, eta, eta_norm, thresh_arr, u_arr, t_s, w_v, w_u, X_data, U_data, history = run_experiment(x0, 0.05, 12, dt, K, T_PE, 10)
-print(t_s * dt)
+def policy_iteration(X_data, U_data, W, dt, eps=1e-6):
+    w_u_i = np.zeros((3,))
+    W_prev = 0
+    history = []
+    while True:
+        Psi, Phi = build_regression(X_data, U_data, w_u_i, W, R.item(), dt)
+        W_hat = np.linalg.lstsq(Psi, -Phi, rcond =None)[0]
+        w_v = W_hat[:3]
+        w_u_i = W_hat[3:]
+        history.append(W_hat)
+        if np.linalg.norm(W_hat - W_prev) < eps:
+            break
+        W_prev = W_hat
+    return w_u_i, w_v, history
+
+arr, arr_m, eta, eta_norm, thresh_arr, u_arr, t_s, w_v, w_u, X_data, U_data, history = run_experiment(x0, 1, 30, dt, K, T_PE, 10)
+print(t_s * dt) #test
+print(w_v, w_u)
