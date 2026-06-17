@@ -73,7 +73,7 @@ def run_experiment(x0, rho, T, dt, K, T_PE, W):
     w_u = None; w_v = None; history = None
 
     for i in range(1, lenT):
-        u_m = float(-(K @ x))   # scalar
+        u_m = (-(K @ x)).item()   # scalar
 
         # switching test (phase 1 only)
         if collect_start is None:
@@ -111,3 +111,27 @@ def run_experiment(x0, rho, T, dt, K, T_PE, W):
     eta_norm = np.linalg.norm(eta, axis=1)
     return arr, arr_m, eta, eta_norm, thresh_arr, u_arr, t_s, w_v, w_u, X_data, U_data, history
 
+def build_regression(X_data, U_data, w_u_i, W, R_scalar, dt):
+    rows = []
+    costs = []
+    k = 0
+    while k+W < len(X_data):
+        psi_v = phi_v(X_data[k+W]) - phi_v(X_data[k])
+        phi_cost = 0.0
+        psi_u = np.zeros(3)
+        for j in range(k, k+W):
+            mu_i_j = w_u_i @ phi_u(X_data[j])
+            diff = U_data[j] - mu_i_j
+            psi_u += 2 * diff * R_scalar * phi_u(X_data[j]) * dt
+            phi_cost += (X_data[j] @ Q @ X_data[j]  +  mu_i_j**2 * R_scalar) * dt
+        row = np.concatenate([psi_v, psi_u])
+        rows.append(row)
+        costs.append(phi_cost)
+
+        k += W
+    Psi = np.array(rows)
+    Phi = np.array(costs)
+    return Psi, Phi
+
+arr, arr_m, eta, eta_norm, thresh_arr, u_arr, t_s, w_v, w_u, X_data, U_data, history = run_experiment(x0, 0.05, 12, dt, K, T_PE, 10)
+print(t_s * dt)
