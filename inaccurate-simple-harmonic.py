@@ -323,7 +323,7 @@ t = np.arange(0, lenT) * dt
 # Figure 3 (paper 7.1.2): norm of states (switched vs model-based-only),
 # control norm, and model error vs threshold. Gray line = switching moment t_s.
 
-state_norm = np.linalg.norm(arr_clean, axis=1)        # ||x|| under deployed composite (no probe)
+state_norm = np.linalg.norm(arr_controlled, axis=1)   # ||x|| including probe window (matches paper)
 state_norm_mb = np.linalg.norm(arr_mb, axis=1)        # ||x|| under model-based only
 
 fig, ax = plt.subplots(3, 1, figsize=(8, 9))
@@ -335,7 +335,7 @@ ax[0].plot(t[1:], state_norm[1:], label='switched composite (deployed)')
 ax[0].plot(t[1:], state_norm_mb[1:], '--', label='model-based only')
 ax[0].axhline(x_min, color='black', linestyle=':', linewidth=0.8, label='x_min')
 ax[0].set_ylabel('||x||')
-ax[0].set_title('Norm of the states (deployed composite; probe excluded)')
+ax[0].set_title('Norm of the states')
 ax[0].legend(fontsize=8)
 ax[0].set_xlim(0, 15)
 
@@ -379,13 +379,16 @@ plt.tight_layout()
 # Figure 4 (paper 7.1.2): convergence of Algorithm-1 weights to the optimal
 # weights w* over policy-iteration steps. Floor at the O(dt) Euler error
 w_star = inverseP_from_wv(K_tilde, P_tilde)
-errs = [np.linalg.norm(w - w_star) for w in history]
+v_errs = [np.linalg.norm(w[:10] - w_star[:10]) for w in history]
+u_errs = [np.linalg.norm(w[10:] - w_star[10:]) for w in history]
 
 plt.figure(figsize=(7, 5))
-plt.semilogy(range(len(errs)), errs, 'o-')
-plt.xlabel('Algorithm 1 iteration i')
-plt.ylabel('|| w_hat_i - w* ||')
+plt.semilogy(range(len(v_errs)), v_errs, 'o-', label=r'$\|\hat{w}_v^i - w_v^*\|$')
+plt.semilogy(range(len(u_errs)), u_errs, 's-', label=r'$\|\hat{w}_u^i - w_u^*\|$')
+plt.xlabel('Iteration Number')
+plt.ylabel('Weights Norm')
 plt.title('Figure 4 (7.1.2): weight error vs iteration')
+plt.legend(fontsize=9)
 plt.grid(True, which='both', alpha=0.3)
 plt.tight_layout()
 plt.show()   # display Figure 3 and Figure 4 interactively

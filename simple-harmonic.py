@@ -147,6 +147,14 @@ ax[2].set_title('Norm of the model error vs. threshold (never crosses)')
 ax[2].legend(fontsize=8)
 ax[2].set_xlim(0, 8)
 
+# inset: zoom into closest approach (~t=6-7.5 s) showing eta stays just under threshold
+axin2 = ax[2].inset_axes([0.30, 0.35, 0.45, 0.55])
+axin2.plot(t[1:], eta_norm[1:]**2)
+axin2.plot(t[1:], thresh_arr[1:])
+axin2.set_xlim(6.0, 7.5)
+i_lo, i_hi = int(6.0/dt), int(7.5/dt)
+axin2.set_ylim(0, max(thresh_arr[i_lo:i_hi].max(), (eta_norm[i_lo:i_hi]**2).max()) * 1.2)
+
 fig.suptitle('Figure 2 (Section 7.1.1): accurate model, no switch')
 plt.tight_layout()
 plt.show()   # display Figure 2 interactively
