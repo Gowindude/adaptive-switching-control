@@ -206,11 +206,21 @@ def sim_switching_integral(x0, a3, T, dt, K, xi, tau, x_min, allow_switch=True):
 #   u~ is ODD -> phi_u has only odd monomials.
 # =============================================================================
 
-def phi_v(x):
-    # CRITIC basis for V(x). Quadratic -- expected to FAIL (V* here is not
-    # quadratic: the cubic drift seeds quartic terms in the augmented HJB).
+def phi_v_quad(x):
+    # Quadratic critic -- the FAIL-FIRST diagnostic (kept for the quad-vs-quartic figure).
+    # V* here is NOT quadratic: the cubic drift a3*th^3 seeds quartic terms in the augmented
+    # HJB (Vx2*a3*th^3 -> th^4, th^3*thd), so a quadratic V leaves an unfittable residual at
+    # large theta. Demonstrated: resid 3.5e-2, garbage actor [0.09,-0.05,0.02]. See OBS-11.
     th, thd = x
     return np.array([th**2, th*thd, thd**2])
+
+
+def phi_v(x):
+    # DEPLOYED CRITIC: quartic, even parity. Quadratic core + the two quartic terms the cubic
+    # drift sources (th^4, th^3*thd). th^3*thd is also the term whose d/d(thd) yields th^3 -- the
+    # critic term that generates the actor's cubic. Recovers resid 9.1e-3 (vs 3.5e-2 quadratic).
+    th, thd = x
+    return np.array([th**2, th*thd, thd**2, th**4, th**3 * thd])
 
 
 def phi_u(x):
@@ -221,18 +231,19 @@ def phi_u(x):
     return np.array([th, thd, th**3])
 
 
-def collect_data(x_start, a3, T_PE, dt, K, amp, freqs=None, phase=2.3):
-    """Separate exploratory rollout (OBS-3 architecture). Run the TRUE plant under the
-    behavior policy u = -K x + probe, recording the state and the probe (augmentation).
-    Off-policy IRL lets the learning data come from this dedicated run rather than the
-    deployed trajectory. Returns X, U and diagnostics so we can confirm the cubic is
-    actually excited BEFORE trusting any learned weight.
+def collect_data(x_start, a3, T_PE, dt, K, amp, stabilize=False, freqs=None, phase=2.3):
+    """Separate exploratory rollout (OBS-3 architecture). Run the TRUE plant under a behavior
+    policy, recording the state and the behavior AUGMENTATION (the part on top of u_m=-Kx).
+    Off-policy IRL lets the learning data come from this dedicated run.
 
-    CAVEAT (control-authority tension): the behavior policy is model-based -Kx, which
-    cannot hold large theta (~|theta| > 0.55 at a3=60) -- the very instability the
-    augmentation exists to fix. So the cleanest large-theta data is partly unreachable
-    from this behavior policy; we collect the largest healthy-cond dataset we can and
-    watch for divergence."""
+    behavior augmentation:
+      stabilize=False : ut = probe                 (model-based behavior u = -Kx + probe)
+      stabilize=True  : ut = -(a3/b)*theta^3 + probe  (rough cubic FEEDFORWARD + probe)
+
+    CAVEAT (control-authority tension, OBS-11): with stabilize=False the model-based -Kx cannot
+    hold large theta (cliff ~|theta|=0.48 at a3=60) -- the very instability the augmentation
+    exists to fix -- so the cubic is barely excitable. stabilize=True cancels the cubic so the
+    plant is ~linear+stable and large-theta data is reachable (DEBT: the feedforward 'knows' a3)."""
     if freqs is None:
         freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
 
@@ -246,9 +257,10 @@ def collect_data(x_start, a3, T_PE, dt, K, amp, freqs=None, phase=2.3):
     diverged = False
     for k in range(N):
         u_m = (-(K @ x)).item()
-        ut  = probe(k * dt)
+        ff  = -(a3 / b) * x[0]**3 if stabilize else 0.0   # rough cubic feedforward (stabilizing part)
+        ut  = ff + probe(k * dt)
         X[k] = x                      # state at step k
-        U[k] = ut                     # behavior augmentation (probe) applied at X[k]
+        U[k] = ut                     # behavior augmentation applied at X[k]
         u = u_m + ut
         x = x + (f(x, a3) + g(x) * u) * dt
         if not np.all(np.isfinite(x)) or np.linalg.norm(x) > 1e3:
@@ -339,38 +351,32 @@ if __name__ == "__main__":
     print("  -> tau is a strong, near-monotone lever on t_s where xi saturates (see OBS-10).")
     print("     CAVEAT: t_s beyond ~0.6 s integrates the OBS-4 monitor divergence, not real mismatch.")
 
-    print("\n=== Steps 3-4: off-policy IRL augmentation (FAIL-FIRST: quadratic critic) ===")
-    print(f"  bases: phi_v = {len(phi_v(x0))} terms (quadratic critic), "
+    print("\n=== Steps 3-4: off-policy IRL augmentation ===")
+    print(f"  deployed bases: phi_v = {len(phi_v(x0))} terms (QUARTIC critic), "
           f"phi_u = {len(phi_u(x0))} terms (odd cubic actor)")
+    T_PE = 8.0; W = 10
 
-    # OBS-11: under the model-based behavior policy -Kx, collection is bounded ONLY for
-    # theta <~ 0.48 (cliff to divergence above it). In that small-theta range the quadratic
-    # critic actually works fine (V ~ quadratic near origin) -- the cubic is barely excited.
-    # Seeing the critic FAIL needs large-theta data, which needs a STABILIZING behavior policy
-    # (decided: -(a3/b)theta^3 feedforward + probe) -- that + the quartic critic are the NEXT step.
-    x_start = np.array([0.4, 0.0])     # larger than the x0=[0.3,0] deploy kick (identifiability)
-    amp     = 0.2                      # bounded under -Kx (amp>=0.5 diverges past the theta~0.48 cliff)
-    T_PE    = 8.0
-    W       = 10
+    # OBS-11 contrast: model-based behavior -Kx cannot reach large theta (the cubic's regime).
+    Xmb, _, dmb = collect_data(np.array([0.4, 0.0]), a3_strong, T_PE, dt, K, 0.2, stabilize=False)
+    print(f"  [OBS-11] model-based behavior (-Kx + probe): |theta|_max = {dmb['abs_theta_max']:.3f}"
+          f"  (stuck near x_start; cubic barely excited)")
 
-    X, U, cdiag = collect_data(x_start, a3_strong, T_PE, dt, K, amp)
-    print(f"  collection: x_start={x_start}, amp={amp}, a3={a3_strong}, T_PE={T_PE}")
-    print(f"    theta range = [{cdiag['theta_min']:+.3f}, {cdiag['theta_max']:+.3f}]  "
-          f"|theta|_max = {cdiag['abs_theta_max']:.3f}  "
-          f"(cubic/linear ratio at extreme = {cdiag['cubic_to_linear']:.3f})")
-    print(f"    diverged = {cdiag['diverged']},  samples kept = {cdiag['N_kept']}")
+    # Stabilizing behavior policy (-(a3/b)theta^3 feedforward + probe) reaches large theta bounded,
+    # where the cubic IS identifiable. DEBT: this feedforward 'knows' a3 (PLAN tech-debt #1).
+    x_start = np.array([1.5, 0.0]); amp = 0.3
+    X, U, cdiag = collect_data(x_start, a3_strong, T_PE, dt, K, amp, stabilize=True)
+    print(f"  stabilized behavior: x_start={x_start}, amp={amp}  -> "
+          f"|theta|_max = {cdiag['abs_theta_max']:.3f}  diverged={cdiag['diverged']}  N={cdiag['N_kept']}")
 
     if cdiag['N_kept'] > W + 1:
         w_u, w_v, history, pidiag = policy_iteration(X, U, W, dt)
         print(f"  policy iteration: {len(history)} iters")
-        print(f"    final Bellman residual = {pidiag[-1]['resid']:.4e}   "
-              "(stays large => critic basis cannot fit V)")
-        print(f"    final cond(Psi)        = {pidiag[-1]['cond']:.4e}   "
-              "(huge => a regressor under-excited: data problem)")
-        print(f"    learned w_v (critic)   = {w_v}")
-        print(f"    learned w_u (actor)    = {w_u}")
-        print(f"    small-signal target    : w_u[:2] ~ -K_tilde_lin = {-K_tilde_lin.flatten()}")
-        print(f"    cubic weight w_u[2]    = {w_u[2]:+.4f}  "
-              f"(expect NEGATIVE, |.| < a3/b = {a3_strong/b:.2f})")
+        print(f"    Bellman residual = {pidiag[-1]['resid']:.4e}   "
+              "(quartic critic; quadratic gives 3.5e-2 -- OBS-11)")
+        print(f"    cond(Psi)        = {pidiag[-1]['cond']:.4e}")
+        print(f"    learned w_v (critic) = {w_v}")
+        print(f"    learned w_u (actor)  = {w_u}")
+        print(f"    [validation step 5 will check: linear part ~ -K_tilde_lin = "
+              f"{-K_tilde_lin.flatten()} on SMALL-theta data; usefulness on LARGE-theta]")
     else:
         print("  collection diverged too early to learn -- back off amp / x_start.")
