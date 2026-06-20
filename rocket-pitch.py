@@ -373,10 +373,29 @@ def rollout_cost(w_u, x0, a3, T=8.0):
 
 
 def stable_envelope(w_u, a3, lo=0.2, hi=1.5, tol=1e-3):
-    """Largest theta0 from which the controller still regulates (bisection on divergence)."""
+    """Largest theta0 from which the ALWAYS-ON controller still regulates (bisection on divergence).
+    w_u=None -> model-based -Kx; else the composite -Kx+u~ applied from t=0."""
     while hi - lo > tol:
         mid = (lo + hi) / 2.0
         if rollout_cost(w_u, np.array([mid, 0.0]), a3) < 1e5:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def switched_envelope(w_u, a3, T=8.0, lo=0.2, hi=1.5, tol=1e-3):
+    """Largest theta0 the DEPLOYED switched system regulates (model-based until t_s, then composite).
+    This is tighter than the always-on composite envelope: during the pre-switch model-based phase the
+    state grows, so the composite must still catch it -- at large theta0 it can't, and the switch
+    timing erodes the achievable envelope. This is the operationally honest number."""
+    def regulates(th0):
+        x0 = np.array([th0, 0.0]); xmin = 0.05 * np.linalg.norm(x0)
+        arr, *_rest = deploy_switched(w_u, x0, a3, T, xi, xmin)
+        return np.all(np.isfinite(arr[-1])) and np.linalg.norm(arr[-1]) < 0.05
+    while hi - lo > tol:
+        mid = (lo + hi) / 2.0
+        if regulates(mid):
             lo = mid
         else:
             hi = mid
@@ -393,6 +412,8 @@ def deploy_switched(w_u, x0, a3, T, xi, x_min):
     x = x0.astype(float).copy(); xm = x0.astype(float).copy()
     t_s = None; switched = False
     for i in range(1, lenT):
+        if not np.all(np.isfinite(x)) or np.linalg.norm(x) > 1e3:
+            arr[i:] = 1e3; break          # diverged (state blew up before the switch could catch it)
         u_m = (-(K @ x)).item()
         thr = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * np.linalg.norm(x)**2 + lam_min_R * u_m**2)
         if not switched and np.linalg.norm(x - xm)**2 >= thr and np.linalg.norm(x) > x_min:
@@ -461,9 +482,12 @@ if __name__ == "__main__":
         print(f"      {th0:>7} {Jmb:>10.4f} {Jcp:>10.4f}   {tag}")
     env_mb  = stable_envelope(None, a3_strong)
     env_cmp = stable_envelope(w_u, a3_strong)
-    print(f"      -> composite wins {n_win}/5 (loses only near origin); "
-          f"STABLE ENVELOPE theta0: {env_mb:.2f} (model-based) -> {env_cmp:.2f} (composite), "
-          f"+{env_cmp-env_mb:.2f} rad")
+    env_sw  = switched_envelope(w_u, a3_strong)
+    print(f"      -> composite wins {n_win}/5 (loses only near origin)")
+    print(f"      STABLE ENVELOPE theta0:  model-based {env_mb:.2f}  |  composite(always-on) {env_cmp:.2f}"
+          f"  |  DEPLOYED switched {env_sw:.2f} rad")
+    print(f"      (deployed {env_sw:.2f} < always-on {env_cmp:.2f}: the pre-switch model-based phase lets"
+          f" the state grow, so the switch timing erodes the envelope -- still +{env_sw-env_mb:.2f} rad vs model-based)")
 
     # (d) degenerate: a3=0 (perfect model) => augmentation should collapse to ~ -K_tilde_lin
     #     (the cubic ~0), confirming there is "nothing extra to learn" when the model is exact.
@@ -519,7 +543,8 @@ if __name__ == "__main__":
     a3p.plot(th0s, cap(Jmbs), 'o-', label='model-based $-Kx$')
     a3p.plot(th0s, cap(Jcps), 's-', label='composite $-Kx+\\tilde u$')
     a3p.axvline(env_mb, color='C0', ls=':', label=f'mb envelope {env_mb:.2f}')
-    a3p.axvline(env_cmp, color='C1', ls=':', label=f'composite envelope {env_cmp:.2f}')
+    a3p.axvline(env_sw, color='C2', ls='--', label=f'deployed switched env {env_sw:.2f}')
+    a3p.axvline(env_cmp, color='C1', ls=':', label=f'composite(always-on) env {env_cmp:.2f}')
     a3p.set_xlabel(r'$\theta_0$ [rad]'); a3p.set_ylabel('true-plant cost J (capped at 5)')
     a3p.legend(fontsize=8); a3p.set_title('Rocket pitch: augmentation usefulness & stable-envelope extension')
     plt.tight_layout(); fig3.savefig('rocket_usefulness.png', dpi=110); plt.close(fig3)

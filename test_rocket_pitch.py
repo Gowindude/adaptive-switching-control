@@ -169,11 +169,16 @@ for th0 in [0.4, 0.5]:
     check(f"usefulness: composite < model-based at theta0={th0}", Jcp < Jmb,
           f"J_mb={Jmb:.3f}  J_cmp={Jcp:.3f}")
 
-# Stable-envelope extension (the honest headline).
+# Stable-envelope extension. Three numbers: model-based, always-on composite, DEPLOYED switched.
 env_mb = rp.stable_envelope(None, rp.a3_strong)
 env_cp = rp.stable_envelope(w_u, rp.a3_strong)
-check("composite extends the stable envelope (> +0.2 rad)", env_cp - env_mb > 0.2,
-      f"mb={env_mb:.2f} -> cmp={env_cp:.2f}")
+env_sw = rp.switched_envelope(w_u, rp.a3_strong)
+check("always-on composite extends the stable envelope (> +0.2 rad)", env_cp - env_mb > 0.2,
+      f"mb={env_mb:.2f} -> composite={env_cp:.2f}")
+check("DEPLOYED switched system extends the envelope (>= +0.15 rad vs model-based)",
+      env_sw - env_mb >= 0.15, f"mb={env_mb:.2f} -> switched={env_sw:.2f}")
+check("deployed switched envelope <= always-on (switch timing erodes it, not exceeds it)",
+      env_sw <= env_cp + 1e-9, f"switched={env_sw:.2f}  always-on={env_cp:.2f}")
 
 # Near origin the model is EXACT (cubic vanishes) => composite must NOT beat -Kx (OBS-1).
 Jmb0 = rp.rollout_cost(None, np.array([0.2, 0.0]), rp.a3_strong)
