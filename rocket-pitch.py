@@ -277,50 +277,132 @@ def collect_data(x_start, a3, T_PE, dt, K, amp, stabilize=False, freqs=None, pha
     return X, U, diag
 
 
-def build_regression(X_data, U_data, w_u_i, W, R_scalar, dt):
-    # Ported from perturbed-oscillator.py, parameterized: n_v/n_u replace the
-    # hardcoded 3s so the bases can change with a one-line edit.
-    n_u = len(phi_u(X_data[0]))
+def build_regression(segments, w_u_i, W, R_scalar, dt):
+    # Off-policy IRL regression (ported from perturbed-oscillator.py, parameterized n_v/n_u).
+    # `segments` is a list of (X, U) rollouts; rows are built WITHIN each segment so a Bellman
+    # window never straddles two trajectories. This is what lets us learn from MULTIPLE
+    # moderate-theta initial conditions at once -- the unbiased-fit fix (OBS-12): one fat
+    # large-theta rollout is poison (target policy can't stabilize there -> V undefined), while
+    # several moderate, stabilizable rollouts pin both the linear gain and the cubic cleanly.
+    n_u = len(phi_u(segments[0][0][0]))
     rows, costs = [], []
-    k = 0
-    while k + W < len(X_data):
-        psi_v = phi_v(X_data[k+W]) - phi_v(X_data[k])   # value difference V(x_{k+W}) - V(x_k)
-        psi_u = np.zeros(n_u)
-        phi_cost = 0.0
-        for j in range(k, k+W):
-            mu_i_j = w_u_i @ phi_u(X_data[j])           # current-iteration target policy mu_i(x_j)
-            diff = U_data[j] - mu_i_j                    # behavior - target (off-policy gap)
-            psi_u += 2 * diff * R_scalar * phi_u(X_data[j]) * dt
-            phi_cost += (X_data[j] @ Q @ X_data[j] + mu_i_j**2 * R_scalar) * dt
-        rows.append(np.concatenate([psi_v, psi_u]))
-        costs.append(phi_cost)
-        k += W
+    for X_data, U_data in segments:
+        k = 0
+        while k + W < len(X_data):
+            psi_v = phi_v(X_data[k+W]) - phi_v(X_data[k])   # value difference V(x_{k+W}) - V(x_k)
+            psi_u = np.zeros(n_u)
+            phi_cost = 0.0
+            for j in range(k, k+W):
+                mu_i_j = w_u_i @ phi_u(X_data[j])           # current-iteration target policy mu_i(x_j)
+                diff = U_data[j] - mu_i_j                    # behavior - target (off-policy gap)
+                psi_u += 2 * diff * R_scalar * phi_u(X_data[j]) * dt
+                phi_cost += (X_data[j] @ Q @ X_data[j] + mu_i_j**2 * R_scalar) * dt
+            rows.append(np.concatenate([psi_v, psi_u]))
+            costs.append(phi_cost)
+            k += W
     return np.array(rows), np.array(costs)
 
 
-def policy_iteration(X_data, U_data, W, dt, eps=1e-6, max_iter=50):
-    n_v = len(phi_v(X_data[0]))
-    n_u = len(phi_u(X_data[0]))
+def policy_iteration(segments, W, dt, eps=1e-6, max_iter=80):
+    n_v = len(phi_v(segments[0][0][0]))
+    n_u = len(phi_u(segments[0][0][0]))
     w_u_i = np.zeros(n_u)
     W_prev = np.zeros(n_v + n_u)
     history, diag = [], []
+    Psi = None
     for _ in range(max_iter):
-        Psi, Phi = build_regression(X_data, U_data, w_u_i, W, R.item(), dt)
+        Psi, Phi = build_regression(segments, w_u_i, W, R.item(), dt)
         W_hat, *_ = np.linalg.lstsq(Psi, -Phi, rcond=None)
         w_v   = W_hat[:n_v]
         w_u_i = W_hat[n_v:]
         history.append(W_hat)
 
-        # --- DIAGNOSTICS (how to "see" the basis fail) ---
-        resid = np.linalg.norm(Psi @ W_hat + Phi)       # Bellman LS residual (~0 => basis can fit V)
+        # --- DIAGNOSTICS: resid = basis adequacy (can it fit V?); cond = data excitation.
+        resid = np.linalg.norm(Psi @ W_hat + Phi)       # Bellman LS residual (~0 => basis fits V)
         s = np.linalg.svd(Psi, compute_uv=False)
-        cond = s[0] / s[-1]                              # huge => a regressor is under-excited (data problem)
+        cond = s[0] / s[-1]                              # huge => a regressor under-excited (data problem)
         diag.append({"resid": resid, "cond": cond})
 
         if np.linalg.norm(W_hat - W_prev) < eps:
             break
         W_prev = W_hat
     return w_u_i, w_v, history, diag
+
+
+# Deployed learning recipe (the robust, well-conditioned config from the OBS-12 robustness
+# sweep): several MODERATE-theta initial conditions under plain model-based behavior (-Kx +
+# probe, NO a3-feedforward). max|theta| ~ 0.46 stays in the stabilizable region, so the target
+# policy's value function exists and the fit is clean: linear part ~5-7% from -K_tilde_lin,
+# cubic ~ -3.7 (counters the aero cubic). cond flags bad draws (probe/IC choices -> ~5e6).
+LEARN_ICS = [0.2, 0.3, 0.4, 0.45, -0.35]
+LEARN_AMP = 0.15
+LEARN_W   = 10
+LEARN_TPE = 8.0
+
+
+def learn_augmentation(a3, ICs=None, amp=LEARN_AMP, W=LEARN_W, T_PE=LEARN_TPE, stabilize=False):
+    """Collect one rollout per initial condition and learn u~ via off-policy PI (Algorithm 1).
+    Returns (w_u, w_v, history, diag, max_abs_theta). stabilize=False keeps data in the
+    stabilizable region automatically (model-based -Kx regulates moderate theta)."""
+    ICs = LEARN_ICS if ICs is None else ICs
+    segments, max_abs_theta = [], 0.0
+    for xs in ICs:
+        X, U, d = collect_data(np.array([xs, 0.0]), a3, T_PE, dt, K, amp, stabilize=stabilize)
+        segments.append((X, U))
+        max_abs_theta = max(max_abs_theta, d["abs_theta_max"])
+    w_u, w_v, history, diag = policy_iteration(segments, W, dt)
+    return w_u, w_v, history, diag, max_abs_theta
+
+
+def u_composite(w_u, x):
+    # applied composite control: model-based -Kx plus learned augmentation u~ = w_u . phi_u(x)
+    return (-(K @ x)).item() + float(w_u @ phi_u(x))
+
+
+def rollout_cost(w_u, x0, a3, T=8.0):
+    """True-plant cost J = integral (x'Qx + u^2 R) dt. w_u=None -> model-based -Kx only.
+    Returns 1e6 on divergence (so it reads as 'failed to regulate')."""
+    x = x0.astype(float).copy(); J = 0.0; Rs = R.item()
+    for _ in range(int(T / dt)):
+        u = u_composite(w_u, x) if w_u is not None else (-(K @ x)).item()
+        J += (x @ Q @ x + u * u * Rs) * dt
+        x = x + (f(x, a3) + g(x) * u) * dt
+        if not np.all(np.isfinite(x)) or np.linalg.norm(x) > 1e3:
+            return 1e6
+    return J
+
+
+def stable_envelope(w_u, a3, lo=0.2, hi=1.5, tol=1e-3):
+    """Largest theta0 from which the controller still regulates (bisection on divergence)."""
+    while hi - lo > tol:
+        mid = (lo + hi) / 2.0
+        if rollout_cost(w_u, np.array([mid, 0.0]), a3) < 1e5:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def deploy_switched(w_u, x0, a3, T, xi, x_min):
+    """The actual deployed run: model-based -Kx until the switch (Eq.17 eta-test), then the
+    composite -Kx + u~. Returns trajectories + t_s for the figures."""
+    lenT = int(T / dt)
+    arr = np.zeros((lenT, 2)); arr[0] = x0
+    u_arr = np.zeros(lenT); eta = np.zeros((lenT, 2)); thr_arr = np.zeros(lenT)
+    lam_max_Q = np.max(np.diag(Q)); lam_min_R = np.min(np.diag(R)); lam_max_R = np.max(np.diag(R))
+    x = x0.astype(float).copy(); xm = x0.astype(float).copy()
+    t_s = None; switched = False
+    for i in range(1, lenT):
+        u_m = (-(K @ x)).item()
+        thr = (1 / (xi**2 * lam_max_R)) * (lam_max_Q * np.linalg.norm(x)**2 + lam_min_R * u_m**2)
+        if not switched and np.linalg.norm(x - xm)**2 >= thr and np.linalg.norm(x) > x_min:
+            switched = True; t_s = i
+        u = u_composite(w_u, x) if switched else u_m
+        thr_arr[i] = thr; u_arr[i] = u
+        x  = x  + (f(x, a3) + g(x) * u) * dt
+        xm = xm + (Am @ xm + Bm.flatten() * u_m) * dt
+        arr[i] = x; eta[i] = x - xm
+    return arr, u_arr, eta, np.linalg.norm(eta, axis=1), thr_arr, t_s
 
 
 if __name__ == "__main__":
@@ -351,32 +433,109 @@ if __name__ == "__main__":
     print("  -> tau is a strong, near-monotone lever on t_s where xi saturates (see OBS-10).")
     print("     CAVEAT: t_s beyond ~0.6 s integrates the OBS-4 monitor divergence, not real mismatch.")
 
-    print("\n=== Steps 3-4: off-policy IRL augmentation ===")
-    print(f"  deployed bases: phi_v = {len(phi_v(x0))} terms (QUARTIC critic), "
+    print("\n=== Steps 3-4: off-policy IRL augmentation (deployed recipe) ===")
+    print(f"  bases: phi_v = {len(phi_v(x0))} terms (QUARTIC critic), "
           f"phi_u = {len(phi_u(x0))} terms (odd cubic actor)")
-    T_PE = 8.0; W = 10
+    print(f"  learning from moderate-theta ICs {LEARN_ICS} (model-based behavior, no feedforward)")
+    w_u, w_v, history, pidiag, max_th = learn_augmentation(a3_strong)
+    Ktl = -K_tilde_lin.flatten()
+    lin_err = np.linalg.norm(w_u[:2] - Ktl) / np.linalg.norm(Ktl) * 100
+    print(f"  collection max|theta| = {max_th:.3f} (in the stabilizable region)")
+    print(f"  PI: {len(history)} iters   resid = {pidiag[-1]['resid']:.3e}   cond = {pidiag[-1]['cond']:.2e}")
+    print(f"  learned w_u (actor)  = {w_u}")
+    print(f"  learned w_v (critic) = {w_v}")
 
-    # OBS-11 contrast: model-based behavior -Kx cannot reach large theta (the cubic's regime).
-    Xmb, _, dmb = collect_data(np.array([0.4, 0.0]), a3_strong, T_PE, dt, K, 0.2, stabilize=False)
-    print(f"  [OBS-11] model-based behavior (-Kx + probe): |theta|_max = {dmb['abs_theta_max']:.3f}"
-          f"  (stuck near x_start; cubic barely excited)")
+    print("\n=== Step 5: validation ===")
+    print(f"  (a) small-signal: w_u linear part {w_u[:2]} vs -K_tilde_lin {Ktl}  -> {lin_err:.1f}% error")
+    print(f"  (b) cubic weight w_u[2] = {w_u[2]:+.3f}  (NEGATIVE => counters the +a3*theta^3 drift)")
 
-    # Stabilizing behavior policy (-(a3/b)theta^3 feedforward + probe) reaches large theta bounded,
-    # where the cubic IS identifiable. DEBT: this feedforward 'knows' a3 (PLAN tech-debt #1).
-    x_start = np.array([1.5, 0.0]); amp = 0.3
-    X, U, cdiag = collect_data(x_start, a3_strong, T_PE, dt, K, amp, stabilize=True)
-    print(f"  stabilized behavior: x_start={x_start}, amp={amp}  -> "
-          f"|theta|_max = {cdiag['abs_theta_max']:.3f}  diverged={cdiag['diverged']}  N={cdiag['N_kept']}")
+    # (c) usefulness: composite vs model-based true-plant cost, swept over theta0.
+    print("  (c) usefulness (true-plant cost J, composite vs model-based):")
+    print(f"      {'theta0':>7} {'J_mb':>10} {'J_comp':>10}   winner")
+    n_win = 0
+    for th0 in [0.2, 0.3, 0.4, 0.5, 0.55]:
+        Jmb = rollout_cost(None, np.array([th0, 0.0]), a3_strong)
+        Jcp = rollout_cost(w_u, np.array([th0, 0.0]), a3_strong)
+        win = Jcp < Jmb; n_win += win
+        tag = "composite" if win else "model-based (origin: model exact, OBS-1)"
+        print(f"      {th0:>7} {Jmb:>10.4f} {Jcp:>10.4f}   {tag}")
+    env_mb  = stable_envelope(None, a3_strong)
+    env_cmp = stable_envelope(w_u, a3_strong)
+    print(f"      -> composite wins {n_win}/5 (loses only near origin); "
+          f"STABLE ENVELOPE theta0: {env_mb:.2f} (model-based) -> {env_cmp:.2f} (composite), "
+          f"+{env_cmp-env_mb:.2f} rad")
 
-    if cdiag['N_kept'] > W + 1:
-        w_u, w_v, history, pidiag = policy_iteration(X, U, W, dt)
-        print(f"  policy iteration: {len(history)} iters")
-        print(f"    Bellman residual = {pidiag[-1]['resid']:.4e}   "
-              "(quartic critic; quadratic gives 3.5e-2 -- OBS-11)")
-        print(f"    cond(Psi)        = {pidiag[-1]['cond']:.4e}")
-        print(f"    learned w_v (critic) = {w_v}")
-        print(f"    learned w_u (actor)  = {w_u}")
-        print(f"    [validation step 5 will check: linear part ~ -K_tilde_lin = "
-              f"{-K_tilde_lin.flatten()} on SMALL-theta data; usefulness on LARGE-theta]")
-    else:
-        print("  collection diverged too early to learn -- back off amp / x_start.")
+    # (d) degenerate: a3=0 (perfect model) => augmentation should collapse to ~ -K_tilde_lin
+    #     (the cubic ~0), confirming there is "nothing extra to learn" when the model is exact.
+    w_u0, *_ = learn_augmentation(0.0)
+    print(f"  (d) a3=0 (model exact): w_u = {w_u0}  (linear ~ -K_tilde_lin, cubic ~ 0)")
+
+    # (e) OBS-12 regression guard: a single FAT large-theta rollout is POISON (target policy
+    #     can't stabilize 60*theta^3 there -> V undefined -> garbage fit). Contrast vs deployed.
+    Xp, Up, _ = collect_data(np.array([1.5, 0.0]), a3_strong, LEARN_TPE, dt, K, 0.3, stabilize=True)
+    w_u_poison, _, _, dpoison = policy_iteration([(Xp, Up)], LEARN_W, dt)
+    print(f"  (e) OBS-12 poison check: large-theta(1.5) fit w_u = {w_u_poison}  "
+          f"(cubic sign wrong/weak) vs deployed cubic {w_u[2]:+.2f}")
+
+    # ---- Figures (saved as PNG; gitignored) -------------------------------------------
+    print("\n=== Figures ===")
+
+    # Fig 1: the deployed SWITCHED run at the nominal kick x0=[0.3,0] (mechanism view).
+    arr_sw, u_sw, eta_sw, etan_sw, thr_sw, t_s_idx = deploy_switched(w_u, x0, a3_strong, 8.0, xi, x_min)
+    t = np.arange(len(arr_sw)) * dt
+    ts = t_s_idx * dt if t_s_idx is not None else None
+    fig1, ax = plt.subplots(3, 1, figsize=(7, 9))
+    ax[0].plot(t, arr_sw[:, 0], label=r'$\theta$'); ax[0].plot(t, arr_sw[:, 1], label=r'$\dot\theta$')
+    ax[0].set_ylabel('states [rad, rad/s]'); ax[0].legend(fontsize=8); ax[0].set_xlim(0, 8)
+    ax[1].plot(t[1:], u_sw[1:], label='u (gimbal)'); ax[1].set_ylabel('control'); ax[1].legend(fontsize=8); ax[1].set_xlim(0, 8)
+    ax[2].plot(t[1:], etan_sw[1:]**2, label=r'$\|\eta\|^2$'); ax[2].plot(t[1:], thr_sw[1:], label='threshold')
+    ax[2].set_ylabel('model error'); ax[2].set_xlabel('t [s]'); ax[2].legend(fontsize=8)
+    # zoom to the switching window: past ~0.6 s eta^2 is the OBS-4 monitor divergence, not mismatch
+    _we = int(0.8 / dt)
+    ax[2].set_xlim(0, 0.8); ax[2].set_ylim(0, max(thr_sw[1:_we].max(), (etan_sw[1:_we]**2).max()) * 1.2)
+    for a in ax:
+        if ts: a.axvline(ts, color='gray', ls=':')
+    fig1.suptitle(f'Rocket pitch: deployed switched run (x0={x0}, a3={a3_strong}), t_s={ts:.2f}s' if ts
+                  else 'Rocket pitch: deployed run')
+    plt.tight_layout(); fig1.savefig('rocket_switched.png', dpi=110); plt.close(fig1)
+
+    # Fig 2: weight convergence (critic & actor) vs PI iteration -> their final values.
+    wv_f, wu_f = history[-1][:len(w_v)], history[-1][len(w_v):]
+    ev = [np.linalg.norm(h[:len(w_v)] - wv_f) for h in history]
+    eu = [np.linalg.norm(h[len(w_v):] - wu_f) for h in history]
+    fig2, a2 = plt.subplots(figsize=(7, 4))
+    a2.semilogy(range(len(ev)), np.array(ev) + 1e-16, 'o-', label=r'$\|\hat w_v^i - \hat w_v^\infty\|$')
+    a2.semilogy(range(len(eu)), np.array(eu) + 1e-16, 's-', label=r'$\|\hat w_u^i - \hat w_u^\infty\|$')
+    a2.set_xlabel('PI iteration'); a2.set_ylabel('weight error'); a2.legend(); a2.grid(True, which='both', alpha=0.3)
+    a2.set_title('Rocket pitch: Algorithm-1 weight convergence')
+    plt.tight_layout(); fig2.savefig('rocket_weights.png', dpi=110); plt.close(fig2)
+
+    # Fig 3: usefulness -- true-plant cost vs theta0, composite vs model-based, with envelopes.
+    th0s = np.linspace(0.2, 1.0, 33)
+    Jmbs = [rollout_cost(None, np.array([th, 0.0]), a3_strong) for th in th0s]
+    Jcps = [rollout_cost(w_u, np.array([th, 0.0]), a3_strong) for th in th0s]
+    cap = lambda L: [min(j, 5.0) for j in L]   # cap diverged (1e6) for plotting
+    fig3, a3p = plt.subplots(figsize=(7, 4.5))
+    a3p.plot(th0s, cap(Jmbs), 'o-', label='model-based $-Kx$')
+    a3p.plot(th0s, cap(Jcps), 's-', label='composite $-Kx+\\tilde u$')
+    a3p.axvline(env_mb, color='C0', ls=':', label=f'mb envelope {env_mb:.2f}')
+    a3p.axvline(env_cmp, color='C1', ls=':', label=f'composite envelope {env_cmp:.2f}')
+    a3p.set_xlabel(r'$\theta_0$ [rad]'); a3p.set_ylabel('true-plant cost J (capped at 5)')
+    a3p.legend(fontsize=8); a3p.set_title('Rocket pitch: augmentation usefulness & stable-envelope extension')
+    plt.tight_layout(); fig3.savefig('rocket_usefulness.png', dpi=110); plt.close(fig3)
+
+    # Fig 4: OBS-11 critic-basis lesson -- hold actor (cubic), vary critic (quad vs quartic).
+    import sys as _sys
+    segs_fig = [collect_data(np.array([xs, 0.0]), a3_strong, LEARN_TPE, dt, K, LEARN_AMP)[:2]
+                for xs in LEARN_ICS]
+    _, _, _, d_q4 = policy_iteration(segs_fig, LEARN_W, dt); resid_q4 = d_q4[-1]['resid']
+    _orig = phi_v; _sys.modules[__name__].phi_v = phi_v_quad
+    _, _, _, d_q2 = policy_iteration(segs_fig, LEARN_W, dt); resid_q2 = d_q2[-1]['resid']
+    _sys.modules[__name__].phi_v = _orig
+    fig4, a4 = plt.subplots(figsize=(5, 4))
+    a4.bar(['quadratic\ncritic', 'quartic\ncritic'], [resid_q2, resid_q4], color=['C3', 'C2'])
+    a4.set_ylabel('final Bellman residual'); a4.set_yscale('log')
+    a4.set_title('Rocket pitch (OBS-11): quartic critic fits V,\nquadratic cannot (actor held fixed)')
+    plt.tight_layout(); fig4.savefig('rocket_critic_basis.png', dpi=110); plt.close(fig4)
+    print(f"  saved: rocket_switched.png, rocket_weights.png, rocket_usefulness.png, rocket_critic_basis.png")
+    print(f"  (critic-basis: quadratic resid {resid_q2:.2e} vs quartic {resid_q4:.2e})")

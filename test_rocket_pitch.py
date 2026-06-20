@@ -2,12 +2,13 @@
 
 Run:  python test_rocket_pitch.py
 
-Scope (IMPORTANT): these assert only what is verifiable BEFORE the model-free
-augmentation (Algorithm 1) is built -- structural properties, switching
-behavior, and monotonicity of the switch time in the two knobs (xi and a3).
-We deliberately do NOT test "usefulness" (composite beats model-based in true-
-plant cost): that requires the learned augmentation, which is steps 3-4 and not
-in rocket-pitch.py yet. Add those tests after the RL is ported (see PLAN.md).
+Scope: structural properties, switching behavior, monotonicity of t_s in the
+two knobs (xi, a3), the integral switching law, AND (section 6) the off-policy
+RL augmentation (steps 3-5): basis dims/parity, recovery of -K_tilde_lin, the
+negative cubic, usefulness (composite beats model-based) + stable-envelope
+extension, the a3=0 degenerate collapse, and the OBS-11/OBS-12 guards (quartic
+critic beats quadratic; large-theta data is poison). Assertions on the learned
+weights are RANGE checks, not exact values (the fit has discretization noise).
 
 No pytest dependency -- plain asserts + a PASS/FAIL summary so it runs anywhere.
 """
@@ -141,6 +142,67 @@ print(f"  -> over xi in [{xis[0]}, {xis[-1]}], t_s moves "
 print("  a3   :", "  ".join(f"{a:>5}" for a in a3s))
 print("  t_s  :", "  ".join(f"{(t if t else float('nan')):>5.2f}" for t in ts_a3))
 print(f"  -> at fixed xi={xi}, varying a3 is the dominant lever on t_s.")
+
+
+# --- 6. RL augmentation (steps 3-5): off-policy IRL learns a USEFUL u~ --------------
+# Structural: basis dimensions + parity (rocket is odd-symmetric => V even, u~ odd).
+xp = np.array([0.7, -0.4])
+check("phi_v has 5 terms (quartic critic)", len(rp.phi_v(xp)) == 5, f"n_v={len(rp.phi_v(xp))}")
+check("phi_u has 3 terms (cubic actor)", len(rp.phi_u(xp)) == 3, f"n_u={len(rp.phi_u(xp))}")
+check("phi_u is ODD  (phi_u(-x) == -phi_u(x))", np.allclose(rp.phi_u(-xp), -rp.phi_u(xp)))
+check("phi_v is EVEN (phi_v(-x) ==  phi_v(x))", np.allclose(rp.phi_v(-xp),  rp.phi_v(xp)))
+
+# Deployed learning: moderate multi-IC, model-based behavior (OBS-12 recipe).
+w_u, w_v, hist, pdiag, max_th = rp.learn_augmentation(rp.a3_strong)
+Ktl = -rp.K_tilde_lin.flatten()
+lin_err = np.linalg.norm(w_u[:2] - Ktl) / np.linalg.norm(Ktl)
+check("collection stays in stabilizable region (max|theta| < 0.6)", max_th < 0.6, f"max|theta|={max_th:.3f}")
+check("PI well-conditioned (cond < 1e4)", pdiag[-1]["cond"] < 1e4, f"cond={pdiag[-1]['cond']:.1e}")
+check("learned linear part ~ -K_tilde_lin (<15%)", lin_err < 0.15, f"err={lin_err*100:.1f}%")
+check("learned cubic NEGATIVE and substantial (-5 < w_u[2] < -2)",
+      -5.0 < w_u[2] < -2.0, f"cubic={w_u[2]:.3f}")
+
+# Usefulness: composite beats model-based in true-plant cost where the cubic bites.
+for th0 in [0.4, 0.5]:
+    Jmb = rp.rollout_cost(None, np.array([th0, 0.0]), rp.a3_strong)
+    Jcp = rp.rollout_cost(w_u, np.array([th0, 0.0]), rp.a3_strong)
+    check(f"usefulness: composite < model-based at theta0={th0}", Jcp < Jmb,
+          f"J_mb={Jmb:.3f}  J_cmp={Jcp:.3f}")
+
+# Stable-envelope extension (the honest headline).
+env_mb = rp.stable_envelope(None, rp.a3_strong)
+env_cp = rp.stable_envelope(w_u, rp.a3_strong)
+check("composite extends the stable envelope (> +0.2 rad)", env_cp - env_mb > 0.2,
+      f"mb={env_mb:.2f} -> cmp={env_cp:.2f}")
+
+# Near origin the model is EXACT (cubic vanishes) => composite must NOT beat -Kx (OBS-1).
+Jmb0 = rp.rollout_cost(None, np.array([0.2, 0.0]), rp.a3_strong)
+Jcp0 = rp.rollout_cost(w_u,  np.array([0.2, 0.0]), rp.a3_strong)
+check("near origin (theta0=0.2) model-based <= composite (model exact, OBS-1)",
+      Jmb0 <= Jcp0 + 1e-9, f"J_mb={Jmb0:.4f}  J_cmp={Jcp0:.4f}")
+
+# Degenerate: a3=0 => augmentation collapses (cubic ~ 0, linear ~ -K_tilde_lin).
+w_u0, *_ = rp.learn_augmentation(0.0)
+check("a3=0: cubic ~ 0 (|w_u[2]| < 0.5)", abs(w_u0[2]) < 0.5, f"cubic={w_u0[2]:.3f}")
+check("a3=0: linear ~ -K_tilde_lin (<10%)",
+      np.linalg.norm(w_u0[:2] - Ktl) / np.linalg.norm(Ktl) < 0.10,
+      f"err={np.linalg.norm(w_u0[:2]-Ktl)/np.linalg.norm(Ktl)*100:.1f}%")
+
+# OBS-12 guard: a single FAT large-theta(1.5) rollout is poison -> misses the negative cubic.
+Xp, Up, _ = rp.collect_data(np.array([1.5, 0.0]), rp.a3_strong, rp.LEARN_TPE, rp.dt, rp.K, 0.3, stabilize=True)
+w_u_p, _, _, _ = rp.policy_iteration([(Xp, Up)], rp.LEARN_W, rp.dt)
+check("OBS-12 poison: large-theta fit misses the cubic (much less negative than deployed)",
+      w_u_p[2] > w_u[2] + 1.0, f"poison cubic={w_u_p[2]:.3f} vs deployed {w_u[2]:.3f}")
+
+# OBS-11 guard: hold the actor fixed (cubic), vary only the critic -> quartic fits V, quadratic can't.
+segs = [rp.collect_data(np.array([xs, 0.0]), rp.a3_strong, rp.LEARN_TPE, rp.dt, rp.K, rp.LEARN_AMP)[:2]
+        for xs in rp.LEARN_ICS]
+_, _, _, dq4 = rp.policy_iteration(segs, rp.LEARN_W, rp.dt); rq4 = dq4[-1]["resid"]
+_orig_phi_v = rp.phi_v; rp.phi_v = rp.phi_v_quad
+_, _, _, dq2 = rp.policy_iteration(segs, rp.LEARN_W, rp.dt); rq2 = dq2[-1]["resid"]
+rp.phi_v = _orig_phi_v
+check("OBS-11: quartic critic residual < quadratic (same data, actor fixed)",
+      rq4 < rq2, f"quartic={rq4:.2e}  quad={rq2:.2e}")
 
 
 # --- summary ------------------------------------------------------------------------
