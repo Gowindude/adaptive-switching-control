@@ -194,6 +194,123 @@ def sim_switching_integral(x0, a3, T, dt, K, xi, tau, x_min, allow_switch=True):
     return t_s
 
 
+# =============================================================================
+# STEPS 3-4: off-policy integral-RL augmentation (Algorithm 1).
+#
+# FAIL-FIRST experiment (owner's call): pair a QUADRATIC critic with an odd,
+# cubic-capable actor and watch the critic fail, then diagnose. Only the critic
+# is "wrong" here, so any failure is attributable to it (controlled experiment).
+#
+# Parity (the rocket is odd-symmetric (th,thd)->(-th,-thd), cost even):
+#   V is EVEN -> phi_v has only even monomials.
+#   u~ is ODD -> phi_u has only odd monomials.
+# =============================================================================
+
+def phi_v(x):
+    # CRITIC basis for V(x). Quadratic -- expected to FAIL (V* here is not
+    # quadratic: the cubic drift seeds quartic terms in the augmented HJB).
+    th, thd = x
+    return np.array([th**2, th*thd, thd**2])
+
+
+def phi_u(x):
+    # ACTOR basis for u~(x). Odd parity, cubic-capable so it is NOT the
+    # bottleneck: linear part recovers K_tilde_lin near origin, th^3 counters
+    # the cubic aero moment.
+    th, thd = x
+    return np.array([th, thd, th**3])
+
+
+def collect_data(x_start, a3, T_PE, dt, K, amp, freqs=None, phase=2.3):
+    """Separate exploratory rollout (OBS-3 architecture). Run the TRUE plant under the
+    behavior policy u = -K x + probe, recording the state and the probe (augmentation).
+    Off-policy IRL lets the learning data come from this dedicated run rather than the
+    deployed trajectory. Returns X, U and diagnostics so we can confirm the cubic is
+    actually excited BEFORE trusting any learned weight.
+
+    CAVEAT (control-authority tension): the behavior policy is model-based -Kx, which
+    cannot hold large theta (~|theta| > 0.55 at a3=60) -- the very instability the
+    augmentation exists to fix. So the cleanest large-theta data is partly unreachable
+    from this behavior policy; we collect the largest healthy-cond dataset we can and
+    watch for divergence."""
+    if freqs is None:
+        freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
+
+    def probe(tau):
+        return amp * np.sum(np.sin(freqs * tau + phase))    # scalar
+
+    N = int(T_PE / dt)
+    X = np.zeros((N, 2))
+    U = np.zeros(N)
+    x = x_start.astype(float).copy()
+    diverged = False
+    for k in range(N):
+        u_m = (-(K @ x)).item()
+        ut  = probe(k * dt)
+        X[k] = x                      # state at step k
+        U[k] = ut                     # behavior augmentation (probe) applied at X[k]
+        u = u_m + ut
+        x = x + (f(x, a3) + g(x) * u) * dt
+        if not np.all(np.isfinite(x)) or np.linalg.norm(x) > 1e3:
+            diverged = True
+            X, U = X[:k+1], U[:k+1]   # truncate at blow-up
+            break
+
+    diag = {
+        "theta_min": X[:, 0].min(), "theta_max": X[:, 0].max(),
+        "abs_theta_max": np.abs(X[:, 0]).max(),
+        "cubic_to_linear": np.abs(X[:, 0]).max()**2,   # th^3/th ratio at the extreme = th^2
+        "diverged": diverged, "N_kept": len(X),
+    }
+    return X, U, diag
+
+
+def build_regression(X_data, U_data, w_u_i, W, R_scalar, dt):
+    # Ported from perturbed-oscillator.py, parameterized: n_v/n_u replace the
+    # hardcoded 3s so the bases can change with a one-line edit.
+    n_u = len(phi_u(X_data[0]))
+    rows, costs = [], []
+    k = 0
+    while k + W < len(X_data):
+        psi_v = phi_v(X_data[k+W]) - phi_v(X_data[k])   # value difference V(x_{k+W}) - V(x_k)
+        psi_u = np.zeros(n_u)
+        phi_cost = 0.0
+        for j in range(k, k+W):
+            mu_i_j = w_u_i @ phi_u(X_data[j])           # current-iteration target policy mu_i(x_j)
+            diff = U_data[j] - mu_i_j                    # behavior - target (off-policy gap)
+            psi_u += 2 * diff * R_scalar * phi_u(X_data[j]) * dt
+            phi_cost += (X_data[j] @ Q @ X_data[j] + mu_i_j**2 * R_scalar) * dt
+        rows.append(np.concatenate([psi_v, psi_u]))
+        costs.append(phi_cost)
+        k += W
+    return np.array(rows), np.array(costs)
+
+
+def policy_iteration(X_data, U_data, W, dt, eps=1e-6, max_iter=50):
+    n_v = len(phi_v(X_data[0]))
+    n_u = len(phi_u(X_data[0]))
+    w_u_i = np.zeros(n_u)
+    W_prev = np.zeros(n_v + n_u)
+    history, diag = [], []
+    for _ in range(max_iter):
+        Psi, Phi = build_regression(X_data, U_data, w_u_i, W, R.item(), dt)
+        W_hat, *_ = np.linalg.lstsq(Psi, -Phi, rcond=None)
+        w_v   = W_hat[:n_v]
+        w_u_i = W_hat[n_v:]
+        history.append(W_hat)
+
+        # --- DIAGNOSTICS (how to "see" the basis fail) ---
+        resid = np.linalg.norm(Psi @ W_hat + Phi)       # Bellman LS residual (~0 => basis can fit V)
+        s = np.linalg.svd(Psi, compute_uv=False)
+        cond = s[0] / s[-1]                              # huge => a regressor is under-excited (data problem)
+        diag.append({"resid": resid, "cond": cond})
+
+        if np.linalg.norm(W_hat - W_prev) < eps:
+            break
+        W_prev = W_hat
+    return w_u_i, w_v, history, diag
+
+
 if __name__ == "__main__":
     print("=== Step 1: dynamics, model, LQR gain, structural checks ===")
     print(f"a1 = {a1},  b = {b}")
@@ -221,3 +338,39 @@ if __name__ == "__main__":
         print(f"    tau={tau:<5}: t_s = " + ("None (no switch)" if t_int is None else f"{t_int*dt:.3f} s"))
     print("  -> tau is a strong, near-monotone lever on t_s where xi saturates (see OBS-10).")
     print("     CAVEAT: t_s beyond ~0.6 s integrates the OBS-4 monitor divergence, not real mismatch.")
+
+    print("\n=== Steps 3-4: off-policy IRL augmentation (FAIL-FIRST: quadratic critic) ===")
+    print(f"  bases: phi_v = {len(phi_v(x0))} terms (quadratic critic), "
+          f"phi_u = {len(phi_u(x0))} terms (odd cubic actor)")
+
+    # OBS-11: under the model-based behavior policy -Kx, collection is bounded ONLY for
+    # theta <~ 0.48 (cliff to divergence above it). In that small-theta range the quadratic
+    # critic actually works fine (V ~ quadratic near origin) -- the cubic is barely excited.
+    # Seeing the critic FAIL needs large-theta data, which needs a STABILIZING behavior policy
+    # (decided: -(a3/b)theta^3 feedforward + probe) -- that + the quartic critic are the NEXT step.
+    x_start = np.array([0.4, 0.0])     # larger than the x0=[0.3,0] deploy kick (identifiability)
+    amp     = 0.2                      # bounded under -Kx (amp>=0.5 diverges past the theta~0.48 cliff)
+    T_PE    = 8.0
+    W       = 10
+
+    X, U, cdiag = collect_data(x_start, a3_strong, T_PE, dt, K, amp)
+    print(f"  collection: x_start={x_start}, amp={amp}, a3={a3_strong}, T_PE={T_PE}")
+    print(f"    theta range = [{cdiag['theta_min']:+.3f}, {cdiag['theta_max']:+.3f}]  "
+          f"|theta|_max = {cdiag['abs_theta_max']:.3f}  "
+          f"(cubic/linear ratio at extreme = {cdiag['cubic_to_linear']:.3f})")
+    print(f"    diverged = {cdiag['diverged']},  samples kept = {cdiag['N_kept']}")
+
+    if cdiag['N_kept'] > W + 1:
+        w_u, w_v, history, pidiag = policy_iteration(X, U, W, dt)
+        print(f"  policy iteration: {len(history)} iters")
+        print(f"    final Bellman residual = {pidiag[-1]['resid']:.4e}   "
+              "(stays large => critic basis cannot fit V)")
+        print(f"    final cond(Psi)        = {pidiag[-1]['cond']:.4e}   "
+              "(huge => a regressor under-excited: data problem)")
+        print(f"    learned w_v (critic)   = {w_v}")
+        print(f"    learned w_u (actor)    = {w_u}")
+        print(f"    small-signal target    : w_u[:2] ~ -K_tilde_lin = {-K_tilde_lin.flatten()}")
+        print(f"    cubic weight w_u[2]    = {w_u[2]:+.4f}  "
+              f"(expect NEGATIVE, |.| < a3/b = {a3_strong/b:.2f})")
+    else:
+        print("  collection diverged too early to learn -- back off amp / x_start.")
