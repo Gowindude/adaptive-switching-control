@@ -427,3 +427,311 @@ def learn_augmentation_slosh(eps, omega_s, ICs=None, amp=SLOSH_AMP,
         return None, []
     w_u, _, diag = policy_iteration_slosh(segments, W, dt)
     return w_u, diag
+
+
+# ---------------------------------------------------------------------------
+# eps-sweep: the core Tier-3 experiment
+# ---------------------------------------------------------------------------
+
+def eps_sweep(eps_vals=EPS_SWEEP, omega_s=OMEGA_S_DEFAULT,
+              T=T, dt=dt, xi=xi, x0=x0_4):
+    """Sweep coupling strength eps at fixed omega_s.
+    For each eps, compute pitch costs for all 4 controllers.
+    Also compute: 4-D closed-loop eigenvalues under K_emb (stability map),
+    RL Bellman residual (Assumption-1 signature), switch-fire status.
+    Returns list of result dicts.
+    """
+    x_min = 0.05 * float(np.linalg.norm(x0[:2]))
+    results = []
+
+    for eps in eps_vals:
+        r = {"eps": float(eps)}
+
+        # --- analytical: K_emb stability on 4-D plant ---
+        Ke   = K_emb()
+        A    = A_4d(eps, omega_s)
+        eigs = np.linalg.eigvals(A - B_4d @ Ke)
+        r["eig_real_max"] = float(np.max(eigs.real))
+        r["emb_stable"]   = bool(np.all(eigs.real < 0))
+
+        # --- model-based (K_emb) on 4-D plant, no switch ---
+        arr_mb, u_mb = sim_4d_fixed(x0, eps, omega_s, Ke, T, dt)
+        r["J_mb"] = pitch_cost(arr_mb, u_mb, dt)
+
+        # --- oracle (4-D LQR) ---
+        Ko = K_oracle(eps, omega_s)
+        if Ko is not None:
+            arr_or, u_or = sim_4d_fixed(x0, eps, omega_s, Ko, T, dt)
+            r["J_oracle"] = pitch_cost(arr_or, u_or, dt)
+        else:
+            r["J_oracle"] = 1e6
+
+        # --- full-state composite (augmented 4-D ARE) ---
+        Kfc = K_fullcomp(eps, omega_s)
+        if Kfc is not None:
+            arr_fc, u_fc = sim_4d_fixed(x0, eps, omega_s, Kfc, T, dt)
+            r["J_fullcomp"] = pitch_cost(arr_fc, u_fc, dt)
+        else:
+            r["J_fullcomp"] = 1e6
+
+        # --- pitch-only composite (RL + switching framework) ---
+        wu, diag = learn_augmentation_slosh(eps, omega_s)
+        if diag:
+            r["rl_resid"] = diag[-1]["resid"]
+            r["rl_cond"]  = diag[-1]["cond"]
+        else:
+            r["rl_resid"] = None
+            r["rl_cond"]  = None
+
+        arr_pc, u_pc, eta_psq, thr_arr, ts_pc = sim_slosh_framework(
+            x0, eps, omega_s, w_u=wu, T=T, dt=dt, xi=xi, x_min=x_min)
+        r["J_pitchcomp"] = pitch_cost(arr_pc, u_pc, dt)
+        r["t_s"] = None if ts_pc is None else ts_pc * dt
+        # switch_fires: did eta_pitch cross the threshold? (ts_pc detects it since wu is not None)
+        r["switch_fires"] = ts_pc is not None
+
+        # --- benefit% (relative to model-based; 1e6 -> NaN for display) ---
+        def ben(J):
+            if r["J_mb"] >= 1e5 or J >= 1e5:
+                return float("nan")
+            return (r["J_mb"] - J) / r["J_mb"] * 100.0
+
+        r["benefit_oracle"]    = ben(r["J_oracle"])
+        r["benefit_fullcomp"]  = ben(r["J_fullcomp"])
+        r["benefit_pitchcomp"] = ben(r["J_pitchcomp"])
+
+        results.append(r)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main: diagnostics, sweep, and figures
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    print("=== Rocket Pitch Tier 3: SLOSH (Assumption-1 violation) ===\n")
+
+    # Assumption 1 callout
+    print("Assumption 1 (paper Sec 2): 'The dimensions of the linear model and the")
+    print("system are the same, i.e., Am in R^{nxn}, Bm in R^{nxm}.'")
+    print("HERE VIOLATED: true plant is 4-D, model is 2-D.\n")
+
+    # Structural checks
+    print("--- 2-D model structural checks ---")
+    print(f"  open-loop eig(Am): {np.round(_eig_open.real, 3)} (expect one positive)")
+    print(f"  controllability rank: {np.linalg.matrix_rank(_ctrb)} (expect 2)")
+    print(f"  closed-loop eig:  {np.round(_eig_closed.real, 4)} (expect all negative)")
+    print(f"  K = {K.flatten()}\n")
+
+    omega_s = OMEGA_S_DEFAULT
+
+    # Eigenvalue crossing vs eps (stability map)
+    # 2-D stability grid: K_emb on 4-D plant across (eps, omega_s)
+    print("--- K_emb 2-D stability grid: eps in [0,12] x omega_s in [0.5,15] ---")
+    eps_fine   = np.linspace(0.0, 12.0, 49)
+    oms_fine   = np.linspace(0.5, 15.0, 30)
+    Ke_g       = K_emb()
+    max_re_2d  = np.zeros((len(eps_fine), len(oms_fine)))
+    for _i, eps_g in enumerate(eps_fine):
+        for _j, oms_g in enumerate(oms_fine):
+            A_g  = A_4d(eps_g, oms_g)
+            egs  = np.linalg.eigvals(A_g - B_4d @ Ke_g)
+            max_re_2d[_i, _j] = float(np.max(egs.real))
+    grid_max_re = float(max_re_2d.max())
+    print(f"  Max Re across entire grid: {grid_max_re:.4f}")
+    print(f"  Any unstable? {'YES' if grid_max_re > 0 else 'NO -- K_emb stable everywhere in sweep range'}")
+    print("  'Breaks' = pitch-only composite loses USEFULNESS, not stability.\n")
+
+    # omega_s slice for figure 4 (at omega_s=OMEGA_S_DEFAULT)
+    _j_default = int(round((omega_s - 0.5) / (15.0 - 0.5) * (len(oms_fine) - 1)))
+    max_re     = [float(max_re_2d[_i, _j_default]) for _i in range(len(eps_fine))]
+    eps_crit_idx = next((_i for _i, v in enumerate(max_re) if v > 0), None)
+    eps_crit     = float(eps_fine[eps_crit_idx]) if eps_crit_idx is not None else None
+
+    # omega_s damping criterion at eps=2.0 (damping = min|Re(eig)| across 4 modes)
+    print("--- omega_s damping scan (eps=2.0): most slowly-decaying mode ---")
+    print(f"  {'omega_s':>8}  {'min|Re(eig)|':>14}  {'slowest tc [s]':>16}")
+    for oms in np.linspace(1.0, 12.0, 12):
+        A_s   = A_4d(2.0, oms)
+        egs_s = np.linalg.eigvals(A_s - B_4d @ Ke_g)
+        min_re = float(np.min(np.abs(egs_s.real)))
+        tc    = 1.0 / min_re if min_re > 1e-8 else float("inf")
+        print(f"  {oms:>8.2f}  {min_re:>14.4f}  {tc:>16.2f}")
+    print(f"  (Smallest min|Re| = slowest-decaying mode; low omega_s -> slow slosh.)")
+    print(f"  Using omega_s = {omega_s} rad/s for main sweep.\n")
+
+    # Main eps-sweep
+    print(f"--- eps-sweep (omega_s={omega_s} rad/s) ---")
+    print(f"  {'eps':>6}  {'J_mb':>8}  {'J_or':>8}  {'J_fc':>8}  {'J_pc':>8}"
+          f"  {'ben_or%':>8}  {'ben_fc%':>8}  {'ben_pc%':>8}"
+          f"  {'switch':>7}  {'t_s':>6}  {'resid':>8}  {'emb_stab':>9}")
+
+    sweep = eps_sweep(EPS_SWEEP, omega_s)
+
+    for r in sweep:
+        bo  = r["benefit_oracle"]
+        bfc = r["benefit_fullcomp"]
+        bpc = r["benefit_pitchcomp"]
+        ts  = r["t_s"]
+        rsd = r["rl_resid"]
+        J_or_s  = f"{r['J_oracle']:8.4f}" if r["J_oracle"] < 1e5 else "     nan"
+        J_fc_s  = f"{r['J_fullcomp']:8.4f}" if r["J_fullcomp"] < 1e5 else "     nan"
+        J_pc_s  = f"{r['J_pitchcomp']:8.4f}" if r["J_pitchcomp"] < 1e5 else "     nan"
+        bo_s    = f"{bo:8.1f}" if not np.isnan(bo) else "     nan"
+        bfc_s   = f"{bfc:8.1f}" if not np.isnan(bfc) else "     nan"
+        bpc_s   = f"{bpc:8.1f}" if not np.isnan(bpc) else "     nan"
+        ts_s    = f"{ts:.2f}" if ts is not None else "  None"
+        rsd_s   = f"{rsd:.2e}" if rsd is not None else " -------"
+        stab_s  = "YES" if r["emb_stable"] else "*** NO ***"
+        sw_s    = "YES" if r["switch_fires"] else " no"
+        print(f"  {r['eps']:>6.2f}  {r['J_mb']:>8.4f}  {J_or_s}  {J_fc_s}  {J_pc_s}"
+              f"  {bo_s}  {bfc_s}  {bpc_s}  {sw_s:>7}  {ts_s:>6}  {rsd_s}  {stab_s:>9}")
+
+    # -----------------------------------------------------------------------
+    # Figures
+    # -----------------------------------------------------------------------
+
+    # Helper to extract finite eps values and corresponding benefits
+    def _fin(field):
+        xs, ys = [], []
+        for r in sweep:
+            v = r[field]
+            if not np.isnan(v) and r["J_mb"] < 1e5:
+                xs.append(r["eps"])
+                ys.append(v)
+        return xs, ys
+
+    # Fig 1: benefit% vs eps for all controllers
+    fig1, ax1 = plt.subplots(figsize=(8, 5))
+    for field, label, style in [
+        ("benefit_oracle",    "Oracle 4-D LQR",          "C2-o"),
+        ("benefit_fullcomp",  "Full-state composite",     "C1-s"),
+        ("benefit_pitchcomp", "Pitch-only composite (RL)", "C0-^"),
+    ]:
+        xs, ys = _fin(field)
+        if xs:
+            ax1.plot(xs, ys, style, label=label, lw=1.5, ms=6)
+    ax1.axhline(0, color="k", lw=0.8, ls="--")
+    if eps_crit is not None:
+        ax1.axvline(eps_crit, color="gray", ls=":", lw=1.2,
+                    label=f"K_emb 4-D stability boundary\n(eps={eps_crit:.1f})")
+    ax1.set_xlabel("Coupling strength eps  [1/s²]")
+    ax1.set_ylabel("Benefit% = (J_mb - J_ctrl) / J_mb × 100")
+    ax1.legend(fontsize=9, loc="upper right")
+    ax1.set_title(f"Tier-3 slosh: validity boundary (omega_s = {omega_s} rad/s)\n"
+                  "Pitch-only composite degrades as slosh coupling grows")
+    plt.tight_layout()
+    fig1.savefig("slosh_benefit_sweep.png", dpi=110)
+    plt.close(fig1)
+
+    # Fig 2: state trajectories -- "works" vs "breaks" regimes
+    eps_works = 0.2   # weak coupling -> framework works
+    eps_breaks = 5.0  # strong coupling -> framework breaks (or is near boundary)
+    t_arr  = np.arange(int(T / dt)) * dt
+
+    fig2, axes2 = plt.subplots(3, 2, figsize=(11, 9), sharex=True)
+    fig2.suptitle(f"Tier-3 slosh: state trajectories (omega_s = {omega_s} rad/s)\n"
+                  f"Left: eps={eps_works} (works)   Right: eps={eps_breaks} (breaks)")
+
+    for col, eps_val in enumerate([eps_works, eps_breaks]):
+        # model-based
+        Ke = K_emb()
+        arr_mb_p, u_mb_p = sim_4d_fixed(x0_4, eps_val, omega_s, Ke)
+        # pitch-only composite (re-learn)
+        wu_p, _ = learn_augmentation_slosh(eps_val, omega_s)
+        arr_pc_p, u_pc_p, *_ = sim_slosh_framework(x0_4, eps_val, omega_s, w_u=wu_p)
+        # oracle
+        Ko = K_oracle(eps_val, omega_s)
+        if Ko is not None:
+            arr_or_p, u_or_p = sim_4d_fixed(x0_4, eps_val, omega_s, Ko)
+        else:
+            arr_or_p = arr_mb_p.copy(); arr_or_p[:] = np.nan
+
+        lbl_mb = "model-based" if col == 0 else None
+        lbl_pc = "pitch composite" if col == 0 else None
+        lbl_or = "oracle" if col == 0 else None
+
+        for arr, lbl, sty in [(arr_mb_p, lbl_mb, "k-"),
+                               (arr_pc_p, lbl_pc, "C0-"),
+                               (arr_or_p, lbl_or, "C2--")]:
+            if np.any(np.isfinite(arr[:, 0])):
+                axes2[0, col].plot(t_arr, arr[:, 0], sty, lw=1.5, label=lbl, alpha=0.8)
+                axes2[1, col].plot(t_arr, arr[:, 1], sty, lw=1.5, alpha=0.8)
+                axes2[2, col].plot(t_arr, arr[:, 2], sty, lw=1.5, alpha=0.8)
+
+        axes2[0, col].set_title(f"eps = {eps_val}")
+        axes2[0, col].set_ylabel(r"$\theta$ [rad]")
+        axes2[1, col].set_ylabel(r"$\dot\theta$ [rad/s]")
+        axes2[2, col].set_ylabel(r"$\psi$ [rad]  (slosh)")
+        axes2[2, col].set_xlabel("t [s]")
+
+    axes2[0, 0].legend(fontsize=8)
+    plt.tight_layout()
+    fig2.savefig("slosh_trajectories.png", dpi=110)
+    plt.close(fig2)
+
+    # Fig 3: slosh amplitude |psi - theta| vs time for several eps values
+    fig3, ax3 = plt.subplots(figsize=(8, 4))
+    Ke = K_emb()
+    for eps_val, style in [(0.05, "C0"), (0.2, "C1"), (1.0, "C3"), (3.0, "C2"), (7.0, "k")]:
+        arr_s, _ = sim_4d_fixed(x0_4, eps_val, omega_s, Ke)
+        slosh_amp = arr_s[:, 2] - arr_s[:, 0]   # psi - theta
+        label = f"eps={eps_val}"
+        if np.any(np.isfinite(slosh_amp)):
+            ax3.plot(t_arr, np.where(np.isfinite(slosh_amp), np.abs(slosh_amp), np.nan),
+                     style, lw=1.5, label=label, alpha=0.8)
+    ax3.set_xlabel("t [s]")
+    ax3.set_ylabel(r"$|\psi - \theta|$ [rad]  (slosh relative amplitude)")
+    ax3.legend(fontsize=9)
+    ax3.set_title(f"Tier-3 slosh: relative displacement |psi-theta| (omega_s={omega_s} rad/s)\n"
+                  "Strong coupling: psi tracks theta (small gap); weak coupling: psi lags (large gap)")
+    ax3.set_ylim(bottom=0)
+    plt.tight_layout()
+    fig3.savefig("slosh_amplitude.png", dpi=110)
+    plt.close(fig3)
+
+    # Fig 4: eigenvalue real part of closed-loop K_emb vs eps (stability map)
+    fig4, ax4 = plt.subplots(figsize=(8, 4))
+    ax4.plot(eps_fine, max_re, "C0-", lw=2, label="max Re(eig) of A_4d - B_4d @ K_emb")
+    ax4.axhline(0, color="k", lw=0.8, ls="--")
+    if eps_crit is not None:
+        ax4.axvline(eps_crit, color="C3", ls=":", lw=1.5,
+                    label=f"stability boundary eps={eps_crit:.1f}")
+    ax4.set_xlabel("Coupling strength eps  [1/s²]")
+    ax4.set_ylabel("Max real part of closed-loop eigenvalue")
+    if eps_crit is None:
+        ax4.set_title(f"Tier-3 slosh: K_emb stays stable (max Re<0) across sweep\n"
+                      f"'Breaks' = pitch composite loses usefulness, not K_emb stability "
+                      f"(omega_s={omega_s} rad/s)")
+    else:
+        ax4.set_title(f"Tier-3 slosh: K_emb 4-D stability boundary at eps={eps_crit:.1f}\n"
+                      f"(omega_s = {omega_s} rad/s)")
+    ax4.legend(fontsize=9)
+    plt.tight_layout()
+    fig4.savefig("slosh_stability_map.png", dpi=110)
+    plt.close(fig4)
+
+    # Fig 5: RL Bellman residual vs eps (Assumption-1 signature)
+    eps_rl  = [r["eps"] for r in sweep if r["rl_resid"] is not None]
+    res_rl  = [r["rl_resid"] for r in sweep if r["rl_resid"] is not None]
+    if eps_rl:
+        fig5, ax5 = plt.subplots(figsize=(7, 4))
+        ax5.semilogy(eps_rl, res_rl, "C0-o", lw=1.5, ms=6)
+        ax5.set_xlabel("Coupling strength eps  [1/s²]")
+        ax5.set_ylabel("Pitch-only RL Bellman residual")
+        ax5.set_title("Tier-3 slosh: RL residual grows with eps\n"
+                      "(same pitch state, different slosh => ill-defined value fn: Assumption-1 signature)")
+        ax5.grid(True, which="both", alpha=0.3)
+        if eps_crit is not None:
+            ax5.axvline(eps_crit, color="C3", ls=":", lw=1.2,
+                        label=f"K_emb stability boundary eps={eps_crit:.1f}")
+            ax5.legend(fontsize=9)
+        plt.tight_layout()
+        fig5.savefig("slosh_rl_residual.png", dpi=110)
+        plt.close(fig5)
+
+    figs = ["slosh_benefit_sweep.png", "slosh_trajectories.png",
+            "slosh_amplitude.png", "slosh_stability_map.png"]
+    if eps_rl:
+        figs.append("slosh_rl_residual.png")
+    print(f"\nSaved: {' '.join(figs)}")
