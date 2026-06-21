@@ -105,6 +105,17 @@ ic_span = max(t for t in ts_for_ics if t is not None) - min(t for t in ts_for_ic
 check("OBS-13: switch time is IC-independent for linear mismatch (span < 0.05 s)",
       ic_span < 0.05, f"t_s for IC=[0.2,0.3,0.5,1.0]: {[round(t,3) if t else None for t in ts_for_ics]}")
 
+# OBS-13 addendum: amplitude-independence is EXACT (homogeneity) for same-direction ICs,
+# but switching is DIRECTION-DEPENDENT.  A pure-rate IC [0, theta_dot] keeps theta near zero
+# throughout; mismatch = (a1(t)-a1_0)*theta stays small and never crosses the threshold.
+# This refines "IC-independent" -> "amplitude-independent (exact); direction-dependent."
+xi0_rate  = np.array([0.0, 0.5])
+xmin_rate = 0.05 * np.linalg.norm(xi0_rate)
+_, _, _, _, _, _, ts_rate = rpb.sim_switching_burn(xi0_rate, 6.0, dt, K, xi, xmin_rate)
+check("OBS-13 direction: pure-rate IC [0, 0.5] does NOT fire switch (theta stays small => mismatch stays small)",
+      ts_rate is None,
+      f"t_s={ts_rate * dt if ts_rate is not None else None}")
+
 
 # ---------------------------------------------------------------------------
 # 5. RL bases: parity + dimensionality
