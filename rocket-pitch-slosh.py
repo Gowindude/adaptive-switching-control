@@ -291,3 +291,139 @@ def pitch_cost(arr4, u_arr, dt=dt):
         x_p = arr4[i, :2]
         J  += (float(x_p @ Q @ x_p) + u_arr[i]**2 * Rs) * dt
     return J
+
+
+# ---------------------------------------------------------------------------
+# RL bases for pitch-only composite (quadratic critic, linear actor)
+# No cubic: a3=0 here, so V* is quadratic for pitch-only LTI sub-problem.
+# Linear actor: optimal u~* is linear in x_pitch for LTI mismatch.
+# Bellman residual DEGRADES with eps -- this is the Assumption-1 signature.
+# ---------------------------------------------------------------------------
+
+def phi_v_slosh(x_pitch):
+    """Quadratic critic: [theta^2, theta*thetadot, thetadot^2] (3 terms)."""
+    th, thd = float(x_pitch[0]), float(x_pitch[1])
+    return np.array([th**2, th * thd, thd**2])
+
+
+def phi_u_slosh(x_pitch):
+    """Linear actor: [theta, thetadot] (2 terms).
+    Parity: phi_u(-x) = -phi_u(x) (odd; consistent with linear system)."""
+    return np.array([float(x_pitch[0]), float(x_pitch[1])])
+
+
+SLOSH_ICS   = [0.15, 0.25, 0.35, -0.2, -0.3]   # pitch-only ICs for RL collection
+SLOSH_AMP   = 0.08
+SLOSH_W     = 10
+SLOSH_T_PE  = 8.0
+
+
+def collect_data_slosh(x0_pitch, eps, omega_s, T_PE=SLOSH_T_PE, amp=SLOSH_AMP,
+                       freqs=None, phase=2.3):
+    """Collect pitch-state data from the 4-D plant.
+    Behavior policy: u = -K @ x_pitch + probe (model-based + exploration).
+    Only probe component stored in U (off-policy IRL convention).
+    x0_pitch: 2-D pitch IC; psi = psi_dot = 0 initially (no slosh at start).
+    Returns (X_pitch, U_probe, diagnostic_dict)."""
+    if freqs is None:
+        freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
+
+    def probe(tau):
+        return amp * float(np.sum(np.sin(freqs * tau + phase)))
+
+    N       = int(T_PE / dt)
+    X_pitch = np.zeros((N, 2))
+    U_probe = np.zeros(N)
+    x4      = np.array([float(x0_pitch[0]), float(x0_pitch[1]), 0.0, 0.0])
+    diverged = False
+
+    for k in range(N):
+        x_p  = x4[:2]
+        u_m  = float(-(K @ x_p).item())
+        ut   = probe(k * dt)
+        X_pitch[k] = x_p
+        U_probe[k] = ut
+        u    = u_m + ut
+        x4   = x4 + (f_slosh(x4, eps, omega_s) + B_4d.flatten() * u) * dt
+        if not np.all(np.isfinite(x4)) or float(np.linalg.norm(x4)) > 1e3:
+            diverged = True
+            X_pitch = X_pitch[:k + 1]
+            U_probe = U_probe[:k + 1]
+            break
+
+    return X_pitch, U_probe, {
+        "abs_theta_max": float(np.abs(X_pitch[:, 0]).max()) if len(X_pitch) else 0.0,
+        "diverged":      diverged
+    }
+
+
+def build_regression_slosh(segments, w_u_i, W, R_scalar, dt=dt):
+    """Off-policy IRL regression matrix (Algorithm 1) on pitch-state features.
+    segments: list of (X_pitch, U_probe) from collect_data_slosh.
+    W: Bellman window length; windows never straddle IC boundaries."""
+    n_v, n_u = 3, 2   # phi_v: 3 quadratic; phi_u: 2 linear
+    rows, costs = [], []
+    for X_pitch, U_probe in segments:
+        k = 0
+        while k + W < len(X_pitch):
+            psi_v    = phi_v_slosh(X_pitch[k + W]) - phi_v_slosh(X_pitch[k])
+            psi_u    = np.zeros(n_u)
+            phi_cost = 0.0
+            for j in range(k, k + W):
+                mu_ij     = float(w_u_i @ phi_u_slosh(X_pitch[j]))
+                diff      = float(U_probe[j]) - mu_ij
+                psi_u    += 2.0 * diff * R_scalar * phi_u_slosh(X_pitch[j]) * dt
+                phi_cost += (float(X_pitch[j] @ Q @ X_pitch[j])
+                             + mu_ij**2 * R_scalar) * dt
+            rows.append(np.concatenate([psi_v, psi_u]))
+            costs.append(phi_cost)
+            k += W
+    if not rows:
+        return np.zeros((0, n_v + n_u)), np.zeros(0)
+    return np.array(rows), np.array(costs)
+
+
+def policy_iteration_slosh(segments, W=SLOSH_W, dt=dt, eps_cv=1e-6, max_iter=80):
+    """Algorithm 1 PI loop on pitch-state features.
+    Returns (w_u, w_v, diag) where diag contains resid/cond per iteration.
+    NOTE: Bellman residual may be large when slosh is active (Assumption-1 violation).
+    """
+    n_v, n_u = 3, 2
+    w_u_i  = np.zeros(n_u)
+    W_prev = np.zeros(n_v + n_u)
+    diag   = []
+
+    for _ in range(max_iter):
+        Psi, Phi = build_regression_slosh(segments, w_u_i, W, R.item(), dt)
+        if Psi.shape[0] == 0:
+            break
+        W_hat, *_ = np.linalg.lstsq(Psi, -Phi, rcond=None)
+        w_u_i     = W_hat[n_v:]
+        s         = np.linalg.svd(Psi, compute_uv=False)
+        diag.append({
+            "resid": float(np.linalg.norm(Psi @ W_hat + Phi)),
+            "cond":  float(s[0] / (s[-1] + 1e-30)),
+        })
+        if float(np.linalg.norm(W_hat - W_prev)) < eps_cv:
+            break
+        W_prev = W_hat.copy()
+
+    if not diag:
+        return np.zeros(n_u), np.zeros(n_v), diag
+    return W_hat[n_v:], W_hat[:n_v], diag
+
+
+def learn_augmentation_slosh(eps, omega_s, ICs=None, amp=SLOSH_AMP,
+                              W=SLOSH_W, T_PE=SLOSH_T_PE):
+    """Learn pitch-only u~ from the 4-D plant at given (eps, omega_s).
+    Returns (w_u, diag).  w_u=None if all collection segments diverged."""
+    ICs = SLOSH_ICS if ICs is None else ICs
+    segments = []
+    for xs in ICs:
+        X_p, U_pr, d = collect_data_slosh(np.array([xs, 0.0]), eps, omega_s, T_PE, amp)
+        if not d["diverged"] and len(X_p) >= W + 1:
+            segments.append((X_p, U_pr))
+    if not segments:
+        return None, []
+    w_u, _, diag = policy_iteration_slosh(segments, W, dt)
+    return w_u, diag
