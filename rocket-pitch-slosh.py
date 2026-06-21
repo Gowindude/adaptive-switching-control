@@ -185,3 +185,109 @@ def K_fullcomp(eps, omega_s):
         return Ke + K_t      # shape (1, 4)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Simulation functions
+# ---------------------------------------------------------------------------
+
+def sim_4d_fixed(x0_4, eps, omega_s, K_4d, T=T, dt=dt):
+    """4-D plant under a fixed 1×4 gain throughout (no switching).
+    Used for oracle and full-state composite baselines.
+    Returns (arr4, u_arr) where arr4[:,2:] = slosh states."""
+    N    = int(T / dt)
+    arr4 = np.zeros((N, 4)); arr4[0] = x0_4
+    u_arr = np.zeros(N)
+    x4   = x0_4.astype(float).copy()
+
+    for i in range(1, N):
+        u = float(-(K_4d @ x4).item())
+        u_arr[i] = u
+        x4 = x4 + (f_slosh(x4, eps, omega_s) + B_4d.flatten() * u) * dt
+        if not np.all(np.isfinite(x4)) or float(np.linalg.norm(x4)) > 1e3:
+            arr4[i:] = np.nan
+            u_arr[i:] = np.nan
+            break
+        arr4[i] = x4
+    return arr4, u_arr
+
+
+def sim_slosh_framework(x0_4, eps, omega_s, w_u=None, T=T, dt=dt,
+                        xi=xi, x_min=x_min_4):
+    """Full switching-framework simulation on the 4-D plant.
+
+    Phase 1 (pre-switch): model-based u = -K @ x_pitch.
+    Switch fires (Theorem 1 / Eq. 21) when ||eta_pitch||^2 >= threshold
+    AND ||x_pitch|| > x_min.  eta_pitch = x_pitch - x_m (2-D monitor).
+
+    Phase 2 (post-switch, only if w_u is not None):
+    Pitch-only composite u = -K @ x_pitch + w_u . phi_u(x_pitch).
+
+    w_u=None: model-based throughout (no composite; used to measure J_mb).
+
+    Returns (arr4, u_arr, eta_psq, thr_arr, t_s_step)
+    where t_s_step is the switch step index (None if no switch).
+    """
+    N       = int(T / dt)
+    arr4    = np.zeros((N, 4)); arr4[0] = x0_4
+    u_arr   = np.zeros(N)
+    eta_psq = np.zeros(N)
+    thr_arr = np.zeros(N)
+
+    lam_max_Q = float(np.max(np.diag(Q)))
+    lam_min_R = float(np.min(np.diag(R)))
+    lam_max_R = float(np.max(np.diag(R)))
+
+    x4  = x0_4.astype(float).copy()
+    xm  = x0_4[:2].astype(float).copy()   # 2-D model monitor
+    sw  = False
+    t_s = None
+
+    for i in range(1, N):
+        x_pitch = x4[:2]
+        u_m     = float(-(K @ x_pitch).item())    # model-based on pitch
+
+        # Switching: pitch-only eta vs pitch-state threshold
+        eta_p = x_pitch - xm
+        thr   = (1.0 / (xi**2 * lam_max_R)) * (
+                lam_max_Q * float(np.linalg.norm(x_pitch))**2
+                + lam_min_R * u_m**2)
+
+        if (not sw and w_u is not None
+                and float(np.linalg.norm(eta_p))**2 >= thr
+                and float(np.linalg.norm(x_pitch)) > x_min):
+            sw  = True
+            t_s = i
+
+        eta_psq[i] = float(np.linalg.norm(eta_p))**2
+        thr_arr[i] = thr
+
+        if sw and w_u is not None:
+            u = u_m + float(w_u @ phi_u_slosh(x_pitch))
+        else:
+            u = u_m
+        u_arr[i] = u
+
+        x4  = x4  + (f_slosh(x4, eps, omega_s) + B_4d.flatten() * u) * dt
+        xm  = xm  + (Am @ xm + Bm.flatten() * u_m) * dt
+
+        if not np.all(np.isfinite(x4)) or float(np.linalg.norm(x4)) > 1e3:
+            arr4[i:] = np.nan
+            u_arr[i:] = np.nan
+            break
+        arr4[i] = x4
+
+    return arr4, u_arr, eta_psq, thr_arr, t_s
+
+
+def pitch_cost(arr4, u_arr, dt=dt):
+    """Pitch regulation cost: integral(x_pitch' Q x_pitch + u^2 R) dt.
+    Returns 1e6 if the trajectory diverged (NaN in arr4)."""
+    J      = 0.0
+    Rs     = R.item()
+    for i in range(len(arr4)):
+        if not np.all(np.isfinite(arr4[i])):
+            return 1e6
+        x_p = arr4[i, :2]
+        J  += (float(x_p @ Q @ x_p) + u_arr[i]**2 * Rs) * dt
+    return J
