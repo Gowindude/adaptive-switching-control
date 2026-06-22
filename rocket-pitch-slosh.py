@@ -621,8 +621,7 @@ if __name__ == "__main__":
     ax1.set_title(f"Tier-3 slosh: validity boundary (omega_s = {omega_s} rad/s)\n"
                   "Pitch-only composite degrades as slosh coupling grows")
     plt.tight_layout()
-    fig1.savefig("slosh_benefit_sweep.png", dpi=110)
-    plt.close(fig1)
+    plt.show()
 
     # Fig 2: state trajectories -- "works" vs "breaks" regimes
     eps_works = 0.2   # weak coupling -> framework works
@@ -667,8 +666,7 @@ if __name__ == "__main__":
 
     axes2[0, 0].legend(fontsize=8)
     plt.tight_layout()
-    fig2.savefig("slosh_trajectories.png", dpi=110)
-    plt.close(fig2)
+    plt.show()
 
     # Fig 3: slosh amplitude |psi - theta| vs time for several eps values
     fig3, ax3 = plt.subplots(figsize=(8, 4))
@@ -687,29 +685,26 @@ if __name__ == "__main__":
                   "Strong coupling: psi tracks theta (small gap); weak coupling: psi lags (large gap)")
     ax3.set_ylim(bottom=0)
     plt.tight_layout()
-    fig3.savefig("slosh_amplitude.png", dpi=110)
-    plt.close(fig3)
+    plt.show()
 
-    # Fig 4: eigenvalue real part of closed-loop K_emb vs eps (stability map)
-    fig4, ax4 = plt.subplots(figsize=(8, 4))
-    ax4.plot(eps_fine, max_re, "C0-", lw=2, label="max Re(eig) of A_4d - B_4d @ K_emb")
-    ax4.axhline(0, color="k", lw=0.8, ls="--")
-    if eps_crit is not None:
-        ax4.axvline(eps_crit, color="C3", ls=":", lw=1.5,
-                    label=f"stability boundary eps={eps_crit:.1f}")
+    # Fig 4: 2-D stability map -- max Re(eig) over (eps, omega_s) grid
+    fig4, ax4 = plt.subplots(figsize=(8, 5))
+    # max_re_2d shape: (len(eps_fine), len(oms_fine)); transpose for (omega_s on y, eps on x)
+    pcm = ax4.pcolormesh(eps_fine, oms_fine, max_re_2d.T,
+                         cmap="RdBu_r", vmin=-1.0, vmax=0.5, shading="auto")
+    fig4.colorbar(pcm, ax=ax4, label="Max Re(eig)  [1/s]")
+    cs = ax4.contour(eps_fine, oms_fine, max_re_2d.T, levels=[0.0],
+                     colors="k", linewidths=1.5, linestyles="--")
+    ax4.clabel(cs, fmt="Re=0 (stability boundary)", fontsize=8)
+    ax4.axhline(omega_s, color="C2", ls=":", lw=1.5,
+                label=f"sweep omega_s = {omega_s} rad/s")
     ax4.set_xlabel("Coupling strength eps  [1/s²]")
-    ax4.set_ylabel("Max real part of closed-loop eigenvalue")
-    if eps_crit is None:
-        ax4.set_title(f"Tier-3 slosh: K_emb stays stable (max Re<0) across sweep\n"
-                      f"'Breaks' = pitch composite loses usefulness, not K_emb stability "
-                      f"(omega_s={omega_s} rad/s)")
-    else:
-        ax4.set_title(f"Tier-3 slosh: K_emb 4-D stability boundary at eps={eps_crit:.1f}\n"
-                      f"(omega_s = {omega_s} rad/s)")
+    ax4.set_ylabel("Slosh freq omega_s  [rad/s]")
     ax4.legend(fontsize=9)
+    ax4.set_title("Tier-3 slosh: K_emb 4-D stability map (max Re < 0 = stable)\n"
+                  "'Breaks' = pitch composite loses usefulness, not K_emb stability")
     plt.tight_layout()
-    fig4.savefig("slosh_stability_map.png", dpi=110)
-    plt.close(fig4)
+    plt.show()
 
     # Fig 5: RL Bellman residual vs eps (Assumption-1 signature)
     eps_rl  = [r["eps"] for r in sweep if r["rl_resid"] is not None]
@@ -727,11 +722,4 @@ if __name__ == "__main__":
                         label=f"K_emb stability boundary eps={eps_crit:.1f}")
             ax5.legend(fontsize=9)
         plt.tight_layout()
-        fig5.savefig("slosh_rl_residual.png", dpi=110)
-        plt.close(fig5)
-
-    figs = ["slosh_benefit_sweep.png", "slosh_trajectories.png",
-            "slosh_amplitude.png", "slosh_stability_map.png"]
-    if eps_rl:
-        figs.append("slosh_rl_residual.png")
-    print(f"\nSaved: {' '.join(figs)}")
+        plt.show()
