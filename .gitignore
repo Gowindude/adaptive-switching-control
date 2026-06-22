@@ -15,9 +15,8 @@ __pycache__/
 
 # Claude local memory & local-only docs (owner: keep these out of the repo)
 memory/
+notes/
 CLAUDE.md
-RESEARCH-NOTES.md
-PLAN.md
-TIER1-EXPLANATION.md
-TIER2-EXPLANATION.md
-TIER3-EXPLANATION.md
+
+# Generated figures (archived folder)
+graphs/
