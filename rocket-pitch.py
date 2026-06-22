@@ -521,7 +521,7 @@ if __name__ == "__main__":
         if ts: a.axvline(ts, color='gray', ls=':')
     fig1.suptitle(f'Rocket pitch: deployed switched run (x0={x0}, a3={a3_strong}), t_s={ts:.2f}s' if ts
                   else 'Rocket pitch: deployed run')
-    plt.tight_layout(); fig1.savefig('rocket_switched.png', dpi=110); plt.close(fig1)
+    plt.tight_layout(); plt.show()
 
     # Fig 2: weight convergence (critic & actor) vs PI iteration -> their final values.
     wv_f, wu_f = history[-1][:len(w_v)], history[-1][len(w_v):]
@@ -532,7 +532,7 @@ if __name__ == "__main__":
     a2.semilogy(range(len(eu)), np.array(eu) + 1e-16, 's-', label=r'$\|\hat w_u^i - \hat w_u^\infty\|$')
     a2.set_xlabel('PI iteration'); a2.set_ylabel('weight error'); a2.legend(); a2.grid(True, which='both', alpha=0.3)
     a2.set_title('Rocket pitch: Algorithm-1 weight convergence')
-    plt.tight_layout(); fig2.savefig('rocket_weights.png', dpi=110); plt.close(fig2)
+    plt.tight_layout(); plt.show()
 
     # Fig 3: usefulness -- true-plant cost vs theta0, composite vs model-based, with envelopes.
     th0s = np.linspace(0.2, 1.0, 33)
@@ -547,7 +547,7 @@ if __name__ == "__main__":
     a3p.axvline(env_cmp, color='C1', ls=':', label=f'composite(always-on) env {env_cmp:.2f}')
     a3p.set_xlabel(r'$\theta_0$ [rad]'); a3p.set_ylabel('true-plant cost J (capped at 5)')
     a3p.legend(fontsize=8); a3p.set_title('Rocket pitch: augmentation usefulness & stable-envelope extension')
-    plt.tight_layout(); fig3.savefig('rocket_usefulness.png', dpi=110); plt.close(fig3)
+    plt.tight_layout(); plt.show()
 
     # Fig 4: OBS-11 critic-basis lesson -- hold actor (cubic), vary critic (quad vs quartic).
     import sys as _sys
@@ -561,6 +561,5 @@ if __name__ == "__main__":
     a4.bar(['quadratic\ncritic', 'quartic\ncritic'], [resid_q2, resid_q4], color=['C3', 'C2'])
     a4.set_ylabel('final Bellman residual'); a4.set_yscale('log')
     a4.set_title('Rocket pitch (OBS-11): quartic critic fits V,\nquadratic cannot (actor held fixed)')
-    plt.tight_layout(); fig4.savefig('rocket_critic_basis.png', dpi=110); plt.close(fig4)
-    print(f"  saved: rocket_switched.png, rocket_weights.png, rocket_usefulness.png, rocket_critic_basis.png")
+    plt.tight_layout(); plt.show()
     print(f"  (critic-basis: quadratic resid {resid_q2:.2e} vs quartic {resid_q4:.2e})")

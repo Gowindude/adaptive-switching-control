@@ -528,7 +528,7 @@ if __name__ == "__main__":
                 'Slow pole drifts -3.46 -> -1.41\nregulation slows; cost grows',
                 transform=ax1[1].transAxes, fontsize=8)
     fig1.suptitle('Rocket pitch Tier-2: burn profile (a1 triples, b constant)')
-    plt.tight_layout(); fig1.savefig('burn_profile.png', dpi=110); plt.close(fig1)
+    plt.tight_layout(); plt.show()
 
     # Fig 2: Staleness cost curves
     fig2, ax2 = plt.subplots(figsize=(8, 5))
@@ -540,7 +540,7 @@ if __name__ == "__main__":
     ax2.legend(fontsize=9)
     ax2.set_title('Rocket pitch Tier-2: staleness\n'
                   r'(each $\tilde u$ learned from frozen LTI plant at its $t_\mathrm{freeze}$)')
-    plt.tight_layout(); fig2.savefig('burn_staleness.png', dpi=110); plt.close(fig2)
+    plt.tight_layout(); plt.show()
 
     # Fig 3: Full burn sim (states, control, eta pre-switch)
     fig3, axes3 = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
@@ -562,7 +562,7 @@ if __name__ == "__main__":
     sw_lbl = f'{sw_s:.2f}' if sw_s else 'None'
     fig3.suptitle(f'Rocket pitch Tier-2: full burn sim, t_s={sw_lbl} s\n'
                   r'(model-based before switch; composite $\tilde u_{t=0}$ after)')
-    plt.tight_layout(); fig3.savefig('burn_switched.png', dpi=110); plt.close(fig3)
+    plt.tight_layout(); plt.show()
 
     # Fig 4: PI convergence at t_freeze=0 and t_freeze=10
     fig4, ax4 = plt.subplots(figsize=(7, 4))
@@ -577,7 +577,7 @@ if __name__ == "__main__":
     ax4.legend(fontsize=9); ax4.grid(True, which='both', alpha=0.3)
     ax4.set_title('Rocket pitch Tier-2: Algorithm-1 convergence\n'
                   '(quadratic V* exact => 1-2 iterations)')
-    plt.tight_layout(); fig4.savefig('burn_weights.png', dpi=110); plt.close(fig4)
+    plt.tight_layout(); plt.show()
 
     # ----------------------------------------------------------------
     # Late-burn scenario: validates quasi-static (snapshot) assumption
@@ -612,6 +612,4 @@ if __name__ == "__main__":
     for bar, v in zip(bars, vals):
         ax5.text(bar.get_x() + bar.get_width()/2, v, f'{v:.4f}',
                  ha='center', va='bottom', fontsize=8)
-    plt.tight_layout(); fig5.savefig('burn_quasi_static.png', dpi=110); plt.close(fig5)
-
-    print("\nSaved: burn_profile.png  burn_staleness.png  burn_switched.png  burn_weights.png  burn_quasi_static.png")
+    plt.tight_layout(); plt.show()
