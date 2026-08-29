@@ -124,35 +124,6 @@ def phi_v(x):
     arr = [x1**2, x1*x2, x1*x3, x1*x4, x2**2, x2*x3, x2*x4, x3**2, x3*x4, x4**2]
     return np.array(arr)
 
-# SUPERSEDED by run_experiment(): the PE probe is now injected inline during the
-# [t_s, t_s+T_PE] window of the single deployed trajectory (one source of truth for
-# both the control plot and the RL training data). Kept here for reference only.
-# def collect_data(x_start, K, T_PE, dt):
-#     x = x_start
-#
-#     freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
-#     amp = 3
-#     phase = 2.3
-#     u_tilde = np.array([amp * np.sum(np.sin(freqs * 0)),
-#     amp * np.sum(np.sin(freqs * 0 + phase))])
-#
-#     N = int(T_PE/dt)
-#     X = np.zeros((N, 4))
-#     U_tilde = np.zeros((N, 2))
-#     U_tilde[0] = u_tilde
-#     X[0] = x
-#
-#     for i in range(1, N):
-#         t = i * dt
-#         u = -K @ x + u_tilde
-#         x = x + (A @ x + Bm @ u) * dt
-#         u_tilde = np.array([amp * np.sum(np.sin(freqs * t)),
-#         amp * np.sum(np.sin(freqs * t + phase))])
-#
-#         U_tilde[i] = u_tilde
-#         X[i] = x
-#     return X, U_tilde
-
 def build_regression(X, U_tilde, K_i, W, dt):
     rows = []
     costs = []

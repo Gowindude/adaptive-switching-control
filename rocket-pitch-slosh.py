@@ -1,71 +1,18 @@
-"""rocket-pitch-slosh.py -- Tier 3: SLOSH (breaks Assumption 1)
+"""rocket-pitch-slosh.py -- Tier 3: slosh (breaks Assumption 1)
 
-Assumption 1 (paper §2, exact verbatim):
-    "The dimensions of the linear model and the system are the same,
-    i.e., A_m ∈ R^{n×n}, B_m ∈ R^{n×m}."
+The paper's Assumption 1 requires the model and the true plant to share the
+same state dimension. This tier violates that on purpose: the true plant is
+4-D (pitch + fuel slosh, modeled as a harmonic pendulum coupled to pitch),
+while the model stays the 2-D pitch-only plant from Tier 1. The goal isn't to
+make the framework work here -- it's to map where it stops being useful, via
+a sweep over the pitch-slosh coupling strength eps.
 
-THIS TIER VIOLATES ASSUMPTION 1 BY DESIGN.
-True plant: 4-D (pitch + slosh).  Model: 2-D (pitch only).
-A_m ∈ R^{2×2}  but  A_true ∈ R^{4×4}.
-
-Goal: NOT to make it work -- to MAP THE VALIDITY BOUNDARY of the framework
-experimentally via a coupling-strength (eps) sweep.
-
-Physics
--------
-Fuel slosh is modelled as a harmonic pendulum coupled to pitch (standard
-liquid-propellant slosh model; see Sidi "Spacecraft Dynamics and Control"):
-
-  True plant (4-D):
-    theta_ddot = a1*theta + b*u + eps*(psi - theta)   [pitch + coupling]
-    psi_ddot   = omega_s^2*(theta - psi)              [slosh restoring]
-               - 2*zeta_s*omega_s*psi_dot             [small damping, keeps ARE well-posed]
-    states: x4 = [theta, theta_dot, psi, psi_dot]
-
-  Model (2-D, omits slosh entirely):
-    theta_ddot = a1*theta + b*u
-    states: x_m = [theta, theta_dot]
-
-Compromise (Assumption-1 violation workaround):
-  eta_pitch = [theta, theta_dot] - x_m   (project onto shared pitch states)
-  Switching threshold uses eta_pitch and x_pitch only.
-  When slosh is active, eta_pitch UNDERESTIMATES total mismatch.
-
-Four controllers (baseline comparison set):
-  1. Model-based: u = -K @ x_pitch  (embedded 2-D gain K_emb into 4-D)
-  2. Pitch-only composite (RL): u = -K @ x_pitch + w_u . phi_u(x_pitch)
-     applied after switch fires.  Basis: linear [theta, thetadot].
-     RL learns from 4-D plant data but uses only pitch features.
-  3. Full-state composite (analytical): u = -(K_emb + K_tilde_4d) @ x4
-     Solve augmented ARE in 4-D -- needs full slosh state measurable.
-     Upper bound on what augmentation can achieve.
-  4. Oracle 4-D LQR: u = -K_oracle @ x4
-     Optimal full-state controller knowing true 4-D plant.
-     Ceiling: maximum achievable pitch cost reduction.
-
-Cost metric: PITCH cost = integral(x_pitch' Q x_pitch + u^2 R) dt.
-Slosh amplitude = |psi - theta| shown separately (diagnostic only).
-
-zeta_s = 0.02 (small damping) is physically standard for liquid-propellant
-slosh.  Needed to make A_4d have no imaginary-axis eigenvalues so that the
-4-D ARE is well-posed across the entire eps sweep.
-
-Key findings (OBS-14+):
-  * Switch fires when eps is large enough for eta_pitch to cross threshold.
-    For small eps (weak coupling), switch may NOT fire -- the pitch-projected
-    mismatch stays below threshold even though total 4-D mismatch exists.
-    This is the Assumption-1 signature: the monitoring metric is blind to slosh.
-  * Benefit% transition: pitch-only composite helps at small eps (slosh acts as
-    a small pitch disturbance, learnable indirectly); breaks at large eps or
-    near resonance (omega_s near control BW) where slosh is uncontrollable
-    from pitch state alone.
-  * Bellman residual of pitch-only RL DEGRADES with eps: as slosh grows,
-    the pitch-state value function is no longer well-defined (same pitch state,
-    different slosh state => different cost-to-go). Residual degradation is a
-    measurable signature of the broken assumption.
-  * Eigenvalue crossing: compute eig(A_4d - B_4d @ K_emb) vs eps to find the
-    analytical prediction of where K_emb loses 4-D stability. Overlaid on
-    benefit% curve as a cross-check.
+Since the model only sees pitch, the mismatch signal eta is projected onto
+the shared pitch states, [theta, theta_dot] - x_m; this underestimates the
+true 4-D mismatch whenever slosh is active. Four controllers are compared on
+pitch-regulation cost: model-based only, a pitch-only learned composite, a
+full-state composite (upper bound, needs slosh measurable), and an oracle
+4-D LQR (ceiling). See TIER3-EXPLANATION.md for the full writeup.
 """
 
 import numpy as np
@@ -75,9 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# ---------------------------------------------------------------------------
 # Physical parameters (same pitch plant as Tier-1 and Tier-2)
-# ---------------------------------------------------------------------------
 a1     = 4.0    # pitch instability coefficient [1/s^2]
 b      = 8.0    # TVC authority [1/s^2 per rad gimbal]
 zeta_s = 0.02   # small slosh damping ratio (physically standard; keeps ARE well-posed)
@@ -100,9 +45,7 @@ x0_4    = np.array([0.3, 0.0, 0.0, 0.0])   # pitch kick, no initial slosh
 x_min_4 = 0.05 * float(np.linalg.norm(x0_4[:2]))   # switching guard on pitch norm
 
 
-# ---------------------------------------------------------------------------
 # 2-D model (same as Tier-1: linear aero only, no cubic, no slosh)
-# ---------------------------------------------------------------------------
 Am = np.array([[0.0, 1.0],
                [a1,  0.0]])
 Bm = np.array([[0.0], [b]])
@@ -119,9 +62,7 @@ assert np.linalg.matrix_rank(_ctrb) == 2, "model should be controllable"
 assert np.all(_eig_closed.real < 0), "model-based closed loop should be stable"
 
 
-# ---------------------------------------------------------------------------
 # 4-D true plant (pitch + slosh)
-# ---------------------------------------------------------------------------
 B_4d = np.array([[0.0], [b], [0.0], [0.0]])    # control only enters pitch
 
 
@@ -146,9 +87,7 @@ def f_slosh(x4, eps, omega_s):
     ])
 
 
-# ---------------------------------------------------------------------------
 # Analytical gains
-# ---------------------------------------------------------------------------
 
 # Q extended to 4-D: penalise pitch only (consistent with 2-D objective).
 # Detectability holds because slosh modes are stable (zeta_s > 0).
@@ -187,9 +126,7 @@ def K_fullcomp(eps, omega_s):
         return None
 
 
-# ---------------------------------------------------------------------------
 # Simulation functions
-# ---------------------------------------------------------------------------
 
 def sim_4d_fixed(x0_4, eps, omega_s, K_4d, T=T, dt=dt):
     """4-D plant under a fixed 1×4 gain throughout (no switching).
@@ -293,12 +230,10 @@ def pitch_cost(arr4, u_arr, dt=dt):
     return J
 
 
-# ---------------------------------------------------------------------------
-# RL bases for pitch-only composite (quadratic critic, linear actor)
-# No cubic: a3=0 here, so V* is quadratic for pitch-only LTI sub-problem.
-# Linear actor: optimal u~* is linear in x_pitch for LTI mismatch.
-# Bellman residual DEGRADES with eps -- this is the Assumption-1 signature.
-# ---------------------------------------------------------------------------
+# RL bases for the pitch-only composite: quadratic critic, linear actor (V* and
+# u~* are both linear/quadratic for the pitch-only LTI sub-problem). The Bellman
+# residual degrades as eps grows -- the measurable signature of the broken
+# same-state-dimension assumption.
 
 def phi_v_slosh(x_pitch):
     """Quadratic critic: [theta^2, theta*thetadot, thetadot^2] (3 terms)."""
@@ -429,9 +364,7 @@ def learn_augmentation_slosh(eps, omega_s, ICs=None, amp=SLOSH_AMP,
     return w_u, diag
 
 
-# ---------------------------------------------------------------------------
 # eps-sweep: the core Tier-3 experiment
-# ---------------------------------------------------------------------------
 
 def eps_sweep(eps_vals=EPS_SWEEP, omega_s=OMEGA_S_DEFAULT,
               T=T, dt=dt, xi=xi, x0=x0_4):
@@ -505,9 +438,7 @@ def eps_sweep(eps_vals=EPS_SWEEP, omega_s=OMEGA_S_DEFAULT,
     return results
 
 
-# ---------------------------------------------------------------------------
 # Main: diagnostics, sweep, and figures
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("=== Rocket Pitch Tier 3: SLOSH (Assumption-1 violation) ===\n")
 

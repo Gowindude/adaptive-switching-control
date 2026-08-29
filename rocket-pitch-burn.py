@@ -1,52 +1,21 @@
-"""rocket-pitch-burn.py -- Tier 2: MASS BURN (time-varying pitch dynamics)
+"""rocket-pitch-burn.py -- Tier 2: mass burn (time-varying pitch dynamics)
 
-Physical setup
---------------
-As propellant burns, inertia I(t) decreases, making the aero-instability
-coefficient a1(t) = C_aero / I(t) grow.  Control authority b = T*ell / I(t)
-is held constant (simplified: CG shift + thrust reduction cancel the inertia
-effect on the moment arm, isolating the a1-only drift).
+As propellant burns, inertia I(t) drops, so the aero-instability coefficient
+a1(t) = C_aero / I(t) grows over the burn while control authority b is held
+constant. The nominal model stays frozen at its t=0 value, so the mismatch is
+a linear term (a1(t) - a1_0)*theta that does not vanish at the origin -- unlike
+Tier 1's cubic term, which does.
 
-Burn profile: I(t) = I0 * (1 - (2/3) * t / T_burn), so I halves-to-one-third
-at burnout.  a1 triples from 4 -> 12.  b = 8 throughout.
-
-Nominal model FROZEN at t=0: Am = [[0,1],[a1_0,0]], Bm = [[0],[b0]].
-The model error is a LINEAR term (a1(t) - a1_0) * theta.  It does NOT vanish
-at the origin -- key contrast with Tier-1's cubic a3*theta^3 which is zero
-at theta=0.
-
-Slow closed-loop pole drifts from -3.46 (t=0) to -1.41 (t=T_burn) as the
-nominal K becomes increasingly mismatched.  The system stays stable but
-regulation slows -- cost grows ~61% from t=0 to t=10 s under model-based only.
-
-Central question
------------------
-Is one switch + one learned u~ enough, or does drift make u~ go STALE?
-
-Findings (OBS-13):
-  * Switch time is IC-INDEPENDENT for a linear mismatch: threshold and eta^2
-    both scale with ||x||^2, so the ratio is state-magnitude-independent.
-    t_s ~ 1.37 s for all ICs.  Caveat: holds when x_min scales with IC;
-    a fixed x_min can cause the x_min guard to bind for small ICs.
-  * Snapshot benefit (frozen LTI at t=10): 7.1% cost reduction vs model-based.
-    Staleness gap: 1.6% of J_mb = 23% of augmentation total benefit.
-    Single-shot u~ efficiency: 77%.  One switch + one u~ is 'almost enough'.
-  * Timescale separation: T_burn=10 s >> tau_reg ~ 0.7 s (slow pole -1.41 at burnout),
-    ratio ~14x -- why quasi-static holds and one frozen u~ suffices.
-  * Late-burn quasi-static validation (drifting plant, t_start=8 s): 1.5% benefit.
-    Smaller than snapshot 7.1% because drifting plant starts at a1=9.3 (less mismatch
-    early); snapshot at t=10 is a conservative upper bound, not an overestimate.
-  * Tier-1 comparison: cubic mismatch gave 0.55->0.91 rad envelope win (severe error);
-    linear drift gives 7.1%.  Same framework, different mismatch severity.
+Central question: is one switch plus one learned augmentation enough, or does
+drift make the learned correction go stale over the burn? See
+TIER2-EXPLANATION.md for the full writeup of what was found.
 """
 
 from scipy.linalg import solve_continuous_are
 import numpy as np
 import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------------
 # Burn profile
-# ---------------------------------------------------------------------------
 T_burn = 10.0       # total burn duration [s]
 a1_0   = 4.0        # initial pitch instability coefficient
 b0     = 8.0        # TVC authority -- constant through burn (see docstring)
@@ -60,9 +29,7 @@ def burn_params(t):
     return a1_0 / I_norm, b0              # (a1_t, b_t)
 
 
-# ---------------------------------------------------------------------------
 # Nominal (frozen) model
-# ---------------------------------------------------------------------------
 Am = np.array([[0.0, 1.0],
                [a1_0, 0.0]])
 Bm = np.array([[0.0], [b0]])
@@ -74,9 +41,7 @@ Pm = solve_continuous_are(Am, Bm, Q, R)
 K  = np.linalg.inv(R) @ Bm.T @ Pm        # shape (1, 2)
 
 
-# ---------------------------------------------------------------------------
 # True plant dynamics (time-varying during burn; LTI when frozen at t_freeze)
-# ---------------------------------------------------------------------------
 
 def f_burn(x, t):
     """True drift at burn time t (no cubic; purely a1(t) mismatch)."""
@@ -89,9 +54,7 @@ def g_burn():
     return np.array([0.0, b0])
 
 
-# ---------------------------------------------------------------------------
 # Analytic target: optimal augmentation gain at a frozen burn time
-# ---------------------------------------------------------------------------
 
 def K_tilde_at(t_freeze):
     """Solve the augmented ARE for the LTI plant frozen at t_freeze.
@@ -104,18 +67,14 @@ def K_tilde_at(t_freeze):
     return np.linalg.inv(R) @ Bm.T @ P_tilde    # shape (1, 2)
 
 
-# ---------------------------------------------------------------------------
 # Default sim parameters (same grid as Tier 1)
-# ---------------------------------------------------------------------------
 x0    = np.array([0.3, 0.0])
 dt    = 0.01
 xi    = 1.35
 x_min = 0.05 * np.linalg.norm(x0)
 
 
-# ---------------------------------------------------------------------------
 # Step 2: switching with time-varying plant
-# ---------------------------------------------------------------------------
 
 def sim_switching_burn(x0, T, dt, K, xi, x_min):
     """Euler sim with time-varying plant.  First-crossing switch (Eq. 21).
@@ -160,11 +119,8 @@ def sim_switching_burn(x0, T, dt, K, xi, x_min):
     return arr, xm_arr, eta, np.linalg.norm(eta, axis=1), thr_arr, u_arr, t_s
 
 
-# ---------------------------------------------------------------------------
-# RL bases: QUADRATIC critic + LINEAR actor
-# V* is exactly quadratic for any frozen-time LTI plant.
-# u~* is linear.  No quartic/cubic basis needed (contrast with Tier 1).
-# ---------------------------------------------------------------------------
+# RL bases: quadratic critic + linear actor. V* is exactly quadratic for any
+# frozen-time LTI plant, so no quartic/cubic basis is needed here (contrast Tier 1).
 
 def phi_v_burn(x):
     """Quadratic critic: [theta^2, theta*thetadot, thetadot^2] (3 terms)."""
@@ -178,9 +134,7 @@ def phi_u_burn(x):
     return np.array([float(x[0]), float(x[1])])
 
 
-# ---------------------------------------------------------------------------
 # Off-policy IRL regression (Algorithm 1 adapted to Tier-2 bases)
-# ---------------------------------------------------------------------------
 
 def build_regression_burn(segments, w_u_i, W, R_scalar, dt):
     """Build the off-policy regression matrix.
@@ -231,9 +185,7 @@ def policy_iteration_burn(segments, W, dt, eps=1e-6, max_iter=80):
     return w_u_i, W_hat[:n_v], history, diag
 
 
-# ---------------------------------------------------------------------------
 # Data collection from the FROZEN plant at t_freeze (LTI, no cubic cliff)
-# ---------------------------------------------------------------------------
 
 BURN_LEARN_ICS = [0.15, 0.25, 0.35, -0.2, -0.35]
 BURN_LEARN_AMP = 0.1
@@ -286,9 +238,7 @@ def learn_augmentation_burn(t_freeze,
     return w_u, w_v, history, pdiag, max_th
 
 
-# ---------------------------------------------------------------------------
 # Composite control + deployed snapshot cost (the staleness diagnostic)
-# ---------------------------------------------------------------------------
 
 def u_composite_burn(w_u, x):
     """u = -Kx + w_u . phi_u(x)."""
@@ -334,9 +284,7 @@ def snapshot_cost(w_u, t_freeze, x0_snap=None, T_snap=5.0):
     return J
 
 
-# ---------------------------------------------------------------------------
 # Full burn simulation (time-varying plant, single switch + composite after)
-# ---------------------------------------------------------------------------
 
 def sim_full_burn(w_u_fn, x0, T, dt, K, xi, x_min):
     """Full burn sim with time-varying plant.
@@ -386,31 +334,16 @@ def sim_full_burn(w_u_fn, x0, T, dt, K, xi, x_min):
     return arr, u_arr, np.linalg.norm(eta, axis=1), thr_arr, sw_i
 
 
-# ---------------------------------------------------------------------------
-# Late-burn regulation cost on the GENUINELY TIME-VARYING plant
-#
-# Validates the quasi-static (snapshot) assumption: start from x0 at a late
-# burn time t_start; the plant drifts during the regulation transient.
-# Compare to snapshot_cost(w_u, t_freeze=t_start) on the FROZEN plant.
-# If benefits are similar -> snapshot is a valid proxy for time-varying behavior.
-#
-# Timescale separation: T_burn=10 s >> tau_reg ~ 0.7 s (slow pole -1.41 at
-# end of burn), ratio ~ 14x.  This large separation is why one frozen u~ suffices:
-# the plant drifts slowly compared to closed-loop dynamics.  (OBS-13 note.)
-# ---------------------------------------------------------------------------
+# Validates the quasi-static (snapshot) assumption against the genuinely
+# time-varying plant: start from x0 late in the burn and let the plant drift
+# during the regulation transient, then compare to snapshot_cost at the same
+# frozen time. If the benefits are similar, snapshot is a valid proxy.
 
 def sim_late_burn_cost(w_u, t_start=8.0, T_sim=4.0):
-    """Regulation cost starting at t_start on the GENUINELY TIME-VARYING plant.
-
-    Identical logic to snapshot_cost but calls f_burn(x, t_abs) with the real
-    (drifting) burn time instead of a frozen a1.  The switch fires at ~1.37 s
-    from start (IC-independent); composite applies w_u after the switch.
-
-    t_start=8.0 puts the transient in the late-burn regime where a1 drifts
-    fastest (a1: 9.3 -> 12.0 over 2 s then capped at 12.0 after T_burn).
-
-    Compare to snapshot_cost(w_u, t_freeze=10.0, T_snap=T_sim):
-    if benefit% are similar, the quasi-static approximation is sound."""
+    """Regulation cost starting at t_start on the genuinely time-varying plant
+    (same logic as snapshot_cost, but f_burn uses the real drifting time).
+    Compare to snapshot_cost(w_u, t_freeze=10.0, T_snap=T_sim) -- similar
+    benefit % means the quasi-static approximation is sound."""
     x    = x0.astype(float).copy()
     xm   = x0.astype(float).copy()
     J    = 0.0
@@ -447,9 +380,7 @@ def sim_late_burn_cost(w_u, t_start=8.0, T_sim=4.0):
     return J
 
 
-# ---------------------------------------------------------------------------
 # Main: diagnostics + staleness study + figures
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("=== Rocket Pitch Tier 2: MASS BURN ===\n")

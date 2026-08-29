@@ -32,9 +32,7 @@ def check(name, ok, detail=""):
     print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""))
 
 
-# ---------------------------------------------------------------------------
 # 1. 2-D model structural checks (same plant as Tier-1/2)
-# ---------------------------------------------------------------------------
 check("Am open-loop unstable (positive real eig)",
       np.any(np.linalg.eigvals(rps.Am).real > 0),
       f"eig={np.round(np.linalg.eigvals(rps.Am).real, 3)}")
@@ -47,9 +45,7 @@ check("Am - Bm @ K Hurwitz (all eig negative)",
       f"eig={np.round(np.linalg.eigvals(rps.Am - rps.Bm @ rps.K).real, 4)}")
 
 
-# ---------------------------------------------------------------------------
 # 2. 4-D dynamics structure
-# ---------------------------------------------------------------------------
 
 # At eps=0, A_4d should decouple: pitch block = [[0,1],[a1,0]], slosh independent
 A0 = rps.A_4d(0.0, 3.5)
@@ -78,9 +74,7 @@ check("A_4d: slosh damping A[3,3] == -2*zeta_s*omega_s (negative, stable)",
       np.isclose(A5[3, 3], -2.0 * rps.zeta_s * 3.5), f"A[3,3]={A5[3,3]:.4f}")
 
 
-# ---------------------------------------------------------------------------
 # 3. K_emb structure and 4-D stability
-# ---------------------------------------------------------------------------
 Ke = rps.K_emb()
 
 check("K_emb shape is (1,4)",
@@ -114,9 +108,7 @@ check("K_emb stability: 2-D grid spot-check (25 eps x omega_s combos, all stable
       _grid_stable, "K_emb robust to slosh coupling in tested range")
 
 
-# ---------------------------------------------------------------------------
 # 4. K_oracle validity (should improve on K_emb for eps > 0)
-# ---------------------------------------------------------------------------
 Ko3 = rps.K_oracle(3.0, 3.5)
 check("K_oracle(eps=3) not None (ARE solves)",
       Ko3 is not None)
@@ -128,9 +120,7 @@ if Ko3 is not None:
           np.all(eigs_or.real < 0), f"max_Re={np.max(eigs_or.real):.4f}")
 
 
-# ---------------------------------------------------------------------------
 # 5. Switching behaviour: detection threshold
-# ---------------------------------------------------------------------------
 # At eps=0: model exact for pitch -> switch should NOT fire within 8 s
 _arr0, _u0, _eta0, _thr0, _ts0 = rps.sim_slosh_framework(
     rps.x0_4, 0.0, 3.5, w_u=np.zeros(2))
@@ -158,9 +148,7 @@ check("Switch fires earlier at eps=5 than at eps=1 (larger mismatch -> earlier s
       f" t_s(5)={None if _ts_5 is None else _ts_5*rps.dt:.2f}")
 
 
-# ---------------------------------------------------------------------------
 # 6. Oracle always improves on model-based at moderate/large eps
-# ---------------------------------------------------------------------------
 for eps_test in [1.0, 3.0, 7.0]:
     Ke  = rps.K_emb()
     Ko  = rps.K_oracle(eps_test, 3.5)
@@ -173,9 +161,7 @@ for eps_test in [1.0, 3.0, 7.0]:
               J_or < J_mb, f"J_mb={J_mb:.4f}, J_or={J_or:.4f}")
 
 
-# ---------------------------------------------------------------------------
 # 7. Pitch-only composite degrades with eps (Assumption-1 violation)
-# ---------------------------------------------------------------------------
 # Learn pitch composite at two eps values and compare benefit%
 def _pitch_comp_benefit(eps_val, omega_s=3.5):
     wu, diag = rps.learn_augmentation_slosh(eps_val, omega_s)
@@ -202,9 +188,7 @@ check("Pitch-only composite benefit is NEGATIVE at large eps (actively harmful)"
       f"ben(eps=7)={ben_hi:.2f}%")
 
 
-# ---------------------------------------------------------------------------
 # 8. Bellman residual grows with eps (Assumption-1 signature)
-# ---------------------------------------------------------------------------
 resids = []
 for eps_test in [0.0, 1.0, 5.0]:
     _, diag = rps.learn_augmentation_slosh(eps_test, 3.5)
@@ -220,10 +204,8 @@ check("Bellman residual at eps=1 < eps=5 (residual keeps growing)",
       f"resid(1)={r1:.2e}, resid(5)={r5:.2e}")
 
 
-# ---------------------------------------------------------------------------
 # 9. OBS-1 in 4-D: full-state composite can be WORSE than model-based
 #    (surrogate cost ignores cross-term 2*u_m*u~*R)
-# ---------------------------------------------------------------------------
 Ke  = rps.K_emb()
 Kfc = rps.K_fullcomp(0.0, 3.5)   # at eps=0 OBS-1 effect is most visible
 if Kfc is not None:
@@ -243,9 +225,7 @@ if Kfc is not None:
           J_fc0 > J_mb0, f"J_mb={J_mb0:.4f}, J_fc={J_fc0:.4f}")
 
 
-# ---------------------------------------------------------------------------
 # 10. pitch_cost: diverged trajectory returns 1e6 sentinel
-# ---------------------------------------------------------------------------
 nan_arr = np.full((100, 4), np.nan)
 nan_u   = np.zeros(100)
 check("pitch_cost returns 1e6 for diverged (NaN) trajectory",
@@ -255,9 +235,7 @@ check("pitch_cost = 0 for zero trajectory and zero control",
       rps.pitch_cost(np.zeros((50, 4)), np.zeros(50)) == 0.0)
 
 
-# ---------------------------------------------------------------------------
 # 11. phi_v_slosh and phi_u_slosh: parity checks
-# ---------------------------------------------------------------------------
 x_p = np.array([0.4, -0.1])
 check("phi_v_slosh is EVEN: phi_v(-x) == phi_v(x)",
       np.allclose(rps.phi_v_slosh(-x_p), rps.phi_v_slosh(x_p)))
@@ -266,9 +244,7 @@ check("phi_u_slosh is ODD: phi_u(-x) == -phi_u(x)",
       np.allclose(rps.phi_u_slosh(-x_p), -rps.phi_u_slosh(x_p)))
 
 
-# ---------------------------------------------------------------------------
 # 12. Model-based pitch cost grows with eps (slosh coupling raises the cost)
-# ---------------------------------------------------------------------------
 Ke = rps.K_emb()
 arr_lo, u_lo = rps.sim_4d_fixed(rps.x0_4, 0.0, 3.5, Ke)
 arr_hi, u_hi = rps.sim_4d_fixed(rps.x0_4, 5.0, 3.5, Ke)
@@ -279,9 +255,7 @@ check("Model-based pitch cost grows with eps (slosh makes regulation harder)",
       f"J_mb: eps=0 -> {J_lo:.4f}, eps=5 -> {J_hi:.4f}")
 
 
-# ---------------------------------------------------------------------------
 # Summary
-# ---------------------------------------------------------------------------
 n_pass = sum(1 for _, ok, _ in _results if ok)
 n_fail = sum(1 for _, ok, _ in _results if not ok)
 print(f"\n{'='*60}")

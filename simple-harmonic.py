@@ -113,11 +113,9 @@ print("t_s =", t_s, "(expected None: accurate model regulates without switching)
 
 t = np.arange(0, lenT) * dt
 
-# ============================================================================
-# Figure 2 (paper 7.1.1, accurate model): norm of states, control components,
-# and model error vs threshold. The model-based controller runs the whole time:
-# ||eta||^2 stays UNDER the threshold, so the switch never fires (t_s = None).
-# ============================================================================
+# Figure 2 (paper 7.1.1): norm of states, control components, and model error
+# vs threshold. ||eta||^2 stays under the threshold the whole run, so the
+# switch never fires (t_s = None).
 state_norm = np.linalg.norm(arr_controlled, axis=1)
 x_min = 0.005 * np.linalg.norm(x0)   # switching guard (same as inside getArrControlled)
 

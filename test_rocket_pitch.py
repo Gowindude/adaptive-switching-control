@@ -43,7 +43,7 @@ def t_s_seconds(a3, xi_val, T=8.0, x0_=None, xmin_=None):
     return None if t_s is None else t_s * dt
 
 
-# --- 1. Structural: the model must be the deliberately-imperfect-but-usable one ----
+# 1. Structural: the model must be the deliberately-imperfect-but-usable one
 # Assumption 2 (u_m stabilizes the true system locally) + controllability of (A_m,B_m),
 # and the whole point of the example: the airframe is open-loop UNSTABLE in pitch.
 eig_open = np.linalg.eigvals(rp.Am)
@@ -65,7 +65,7 @@ check("composite -(K+K_tilde_lin) stabilizes linearized plant",
       np.all(eig_comp.real < 0), f"eig={eig_comp}")
 
 
-# --- 2. Switching: the two scenarios must separate cleanly (mirrors 7.2 rho=0.05 vs 1) --
+# 2. Switching: the two scenarios must separate cleanly (mirrors 7.2 rho=0.05 vs 1)
 t_mild = t_s_seconds(rp.a3_mild, xi)
 check("mild cubic (a3_mild) -> NO switch (model-based regulates alone)",
       t_mild is None, f"t_s={t_mild}")
@@ -84,14 +84,14 @@ check("model error eta(0) == 0 (no spurious switch at t0)",
       np.allclose(eta[0], 0.0), f"||eta(0)||={np.linalg.norm(eta[0]):.2e}")
 
 
-# --- 3. Degenerate sanity: a perfect model never switches ---------------------------
+# 3. Degenerate sanity: a perfect model never switches
 # a3 = 0 -> true plant == linear model -> eta stays ~0 -> switch must never fire.
 t_perfect = t_s_seconds(0.0, xi)
 check("a3 = 0 (model exact) -> never switches",
       t_perfect is None, f"t_s={t_perfect}")
 
 
-# --- 4. Monotonicity of t_s in the two knobs (the knobs must behave sensibly) -------
+# 4. Monotonicity of t_s in the two knobs (the knobs must behave sensibly)
 # (a) larger xi (less trust in u_m) -> earlier (smaller) switch time, monotonically.
 xis = [1.0, 1.35, 2.0, 3.0, 5.0]
 ts_xi = [t_s_seconds(rp.a3_strong, q) for q in xis]
@@ -109,7 +109,7 @@ check("t_s decreases monotonically as a3 increases (fixed xi)",
       mono_a3, f"a3={a3s} -> t_s={[round(t,3) if t else None for t in ts_a3]}")
 
 
-# --- 5b. Integral / dwell-time switching law (OBS-10 extension) ----------------------
+# 5b. Integral / dwell-time switching law (OBS-10 extension)
 # tau -> 0 must recover the paper's first-crossing rule (Eq. 21).
 def t_s_int(a3, xi_val, tau, T=14.0):
     t = rp.sim_switching_integral(x0, a3, T, dt, K, xi_val, tau, x_min)
@@ -129,7 +129,7 @@ check("t_s increases monotonically as tau (tolerated violation) increases",
       mono_tau, f"tau={taus} -> t_s={[round(t,3) if t else None for t in ts_tau]}")
 
 
-# --- 5. CHARACTERIZATION (informational, not pass/fail): xi's limited pull on t_s ----
+# 5. CHARACTERIZATION (informational, not pass/fail): xi's limited pull on t_s
 # Documents the finding in PLAN.md / RESEARCH-NOTES: xi only rescales the threshold
 # (enters Eq.17 as 1/xi^2), so in the strong-mismatch regime it slides t_s within a
 # short window and saturates. The mismatch (a3) is the real lever. Printed so the
@@ -144,7 +144,7 @@ print("  t_s  :", "  ".join(f"{(t if t else float('nan')):>5.2f}" for t in ts_a3
 print(f"  -> at fixed xi={xi}, varying a3 is the dominant lever on t_s.")
 
 
-# --- 6. RL augmentation (steps 3-5): off-policy IRL learns a USEFUL u~ --------------
+# 6. RL augmentation (steps 3-5): off-policy IRL learns a USEFUL u~
 # Structural: basis dimensions + parity (rocket is odd-symmetric => V even, u~ odd).
 xp = np.array([0.7, -0.4])
 check("phi_v has 5 terms (quartic critic)", len(rp.phi_v(xp)) == 5, f"n_v={len(rp.phi_v(xp))}")
@@ -210,7 +210,7 @@ check("OBS-11: quartic critic residual < quadratic (same data, actor fixed)",
       rq4 < rq2, f"quartic={rq4:.2e}  quad={rq2:.2e}")
 
 
-# --- summary ------------------------------------------------------------------------
+# summary
 n_pass = sum(ok for _, ok, _ in _results)
 n_tot = len(_results)
 print(f"\n==== {n_pass}/{n_tot} assertions passed ====")

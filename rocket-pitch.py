@@ -3,38 +3,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# Owner's own example: single-axis rocket PITCH attitude control via thrust
-# vector control (TVC).  Control-affine, same state dimension for model and
-# plant (Assumption 1).  Tier 1 = AERO NONLINEARITY ONLY (cubic Duffing-like
-# pitching moment).  Fuel slosh and mass burn are LATER tiers -- design is built
-# to extend to them, but they are not implemented here.
+# Tier 1: single-axis rocket pitch attitude control via thrust-vector control (TVC).
+# Same setup as the paper's perturbed-oscillator example, generalized to a finless,
+# aerodynamically-unstable airframe stabilized by gimballing. Model and plant share
+# the same state dimension (Assumption 1); the model is missing a cubic aero term.
 #
-# This is the paper's Example 1 (perturbed oscillator) generalized to a rocket:
-# a finless / aerodynamically-unstable airframe stabilized by gimballing.
-
-
-
-# State / control
-#   x = [theta, theta_dot]   theta = pitch angle [rad], theta_dot = pitch rate
-#   u = delta                gimbal deflection [rad] (scalar control)
-#   xdot = f(x) + g(x)*u     control-affine
-
-
-# Physical parameter mapping (documented; we use clean rounded values below):
-#   a1 = q*S*d*Cm_alpha / I     linear aero pitching-moment slope / inertia
-#   a3 = q*S*d*Cm_3    / I      CUBIC aero moment (Duffing-like) / inertia
-#   b  = T * ell / I            TVC control authority: thrust * moment arm / I
-# Finless rocket => Cm_alpha > 0 => a1 > 0 => statically UNSTABLE in pitch
-# (the airframe pitches away from the wind), stabilized only by TVC.
+# x = [theta, theta_dot] (pitch angle, pitch rate), u = gimbal deflection [rad]
+# xdot = f(x) + g(x)*u
 #
-# Clean Tier-1 values (rad, s):
-a1 = 4.0    # unstable: open-loop poles at +/- sqrt(a1) = +/- 2 rad/s
-b  = 8.0    # control authority (T*ell/I); g is CONSTANT here
+# a1 = linear aero pitching-moment slope / inertia (open-loop unstable: a1 > 0)
+# a3 = cubic aero moment (Duffing-like) / inertia -- the part the model doesn't see
+# b  = TVC control authority (thrust * moment arm / inertia)
+a1 = 4.0    # poles at +/- sqrt(a1) = +/- 2 rad/s
+b  = 8.0
 
-# Cubic-aero strength is the SCENARIO KNOB (analogous to rho in section 7.2).
-# Same A_m / same K in both scenarios -- only the perturbation a3 changes.
-a3_mild   = 0.5     # weak cubic  -> mismatch stays under threshold, NO switch
-a3_strong = 60.0    # strong cubic -> mismatch grows -> switch fires (~0.54 s), then RL
+# a3 is the scenario knob: same A_m/K in both cases, only the perturbation changes.
+a3_mild   = 0.5     # mismatch stays under threshold, no switch
+a3_strong = 60.0    # mismatch grows, switch fires (~0.54 s), then RL kicks in
 
 
 def f(x, a3):
@@ -50,39 +35,28 @@ def g(x):
 
 
 
-# Available (deliberately-imperfect) model: LINEAR AERO ONLY.
-# Same state dimension (Assumption 1); the only thing the model is missing is
-# the cubic a3*theta^3.  Because g(x) is constant, B_m = g EXACTLY -- there is
-# ZERO input-channel mismatch; ALL model error is the omitted cubic in f.
-
+# Available model: linear aero only. g(x) is constant so Bm = g exactly -- all
+# model error is the omitted cubic in f.
 Am = np.array([[0.0, 1.0],
                [a1,  0.0]])
 Bm = np.array([[0.0],
                [b]])
 
-# LQR weights.  Penalize pitch angle (regulate attitude); modest rate / control.
-Q = np.diag([1.0, 0.1])
+Q = np.diag([1.0, 0.1])   # penalize pitch angle; modest rate/control
 R = np.array([[0.2]])
 
-# Model-based LQR gain (Eq. 11): u_m = -K x, from the inaccurate (linear) model.
+# Model-based LQR gain (Eq. 11): u_m = -Kx
 Pm = solve_continuous_are(Am, Bm, Q, R)
 K  = np.linalg.inv(R) @ Bm.T @ Pm     # shape (1, 2)
 
-
-# Near-origin ground-truth augmentation gain K_tilde_lin (for later validation).
-# The ONLY nonlinearity is a3*theta^3, whose Jacobian at the origin is zero, so
-# the linearized true plant EQUALS A_m exactly.  Hence K_tilde_lin is just the
-# section-7.1 augmented-Riccati gain with A -> A_m:
-#   K_tilde = inv(R) B^T ARE(A_m - B_m K, B_m, Q, R)
-# The RL augmentation ũ(x) should match -K_tilde_lin x for SMALL states (where
-# the cubic is negligible).  Computed now; used in step 5.
+# Near-origin ground truth for later validation: a3*theta^3 has zero Jacobian at
+# the origin, so the linearized true plant equals Am exactly there, and the
+# optimal augmentation gain is just the section-7.1 augmented-Riccati solution
+# with A -> Am. ũ(x) should match -K_tilde_lin x for small theta.
 P_tilde = solve_continuous_are(Am - Bm @ K, Bm, Q, R)
 K_tilde_lin = np.linalg.inv(R) @ Bm.T @ P_tilde   # shape (1, 2)
 
-
-# STEP-1 CHECKS: open-loop instability + controllability of (A_m, B_m).
-# These must actually be verified, not just asserted.
-
+# Structural checks: open-loop instability + controllability of (Am, Bm).
 eig_open = np.linalg.eigvals(Am)
 ctrb = np.hstack([Bm, Am @ Bm])           # [B_m, A_m B_m]
 ctrb_rank = np.linalg.matrix_rank(ctrb)
@@ -92,22 +66,12 @@ ctrb_det = np.linalg.det(ctrb)
 eig_closed = np.linalg.eigvals(Am - Bm @ K)
 
 
-# =============================================================================
-# STEP 2: nonlinear simulation + switching detection.
-#   - True plant integrated with the FULL nonlinear f (incl. cubic), under the
-#     model-based control u = -K x.
-#   - Model trajectory x_m integrated with the LINEAR model (A_m, B_m) under the
-#     SAME applied input -> mismatch eta = x - x_m (Eq. 14).
-#   - Switch fires (Theorem 1 / Eq. 17 & 40) the first instant
-#       ||eta||^2 >= threshold   AND   ||x|| > x_min.
-# No augmentation is applied yet (that's steps 3-4); here we only LOCATE t_s and
-# confirm: mild a3 -> never fires, strong a3 -> fires early.
-#
-# Threshold uses lam_MAX(Q) per OBS-5 (paper's figures); here Q=diag(1,0.1) is
-# NOT degenerate, so lam_max vs lam_min is the section-7.1 modeling choice.
-# =============================================================================
+# Switching: true plant (full nonlinear f) and model trajectory x_m (linear Am, Bm)
+# are integrated under the same input; mismatch eta = x - x_m (Eq. 14). The switch
+# fires (Theorem 1 / Eq. 17 & 40) the first instant ||eta||^2 >= threshold and
+# ||x|| > x_min. No augmentation is applied here -- this just locates t_s.
 
-x0 = np.array([0.3, 0.0])   # ~17 deg pitch disturbance (e.g. a wind-gust kick), zero rate
+x0 = np.array([0.3, 0.0])   # ~17 deg pitch disturbance, zero rate
 dt = 0.01
 xi = 1.35                   # suboptimality slack in the threshold (Eq. 17); tuned below
 x_min = 0.05 * np.linalg.norm(x0)   # switching guard: don't switch once essentially regulated
@@ -153,18 +117,15 @@ def sim_switching(x0, a3, T, dt, K, xi, x_min, allow_switch=True):
 
 
 def sim_switching_integral(x0, a3, T, dt, K, xi, tau, x_min, allow_switch=True):
-    """Integral / dwell-time switching (OBS-10 extension). Instead of switching at the FIRST
-    instant ||eta||^2 >= threshold (paper Eq. 21), switch when the ACCUMULATED certificate
-    violation exceeds a tolerance tau:
-        t_s = inf{ t : integral_0^t  max(0, ||eta||^2 - thr) ds  >= tau }
-    tau -> 0+ recovers the paper's first-crossing rule. tau = "how much cumulative
-    suboptimality I tolerate before switching" -- a constant with real pull on t_s where
-    xi alone saturates (xi only rescales thr; see OBS-10). Returns the switch index or None.
+    """Integral/dwell-time switching: instead of switching at the first instant
+    ||eta||^2 >= threshold (Eq. 21), switch once the accumulated violation
+        integral(max(0, ||eta||^2 - thr) dt
+    exceeds tolerance tau. tau -> 0+ recovers the paper's first-crossing rule; tau
+    gives a second, more direct lever on t_s than xi alone. Returns switch index or None.
 
-    CAVEAT (OBS-4 / OBS-10): once the true plant regulates (here ~0.6 s), ||eta|| is dominated
-    by the UNSTABLE model monitor x_m diverging, not genuine plant-model mismatch. So switches
-    with t_s beyond regulation integrate that artifact. A principled version freezes/resets x_m
-    at regulation (the OBS-4 fix). Left explicit here as a meeting talking point.
+    Caveat: once the plant regulates (~0.6 s here), ||eta|| is mostly the unstable
+    model monitor x_m diverging rather than genuine mismatch, so large tau integrates
+    that artifact rather than real suboptimality.
     """
     lenT = int(T / dt)
     lam_max_Q = np.max(np.diag(Q))
@@ -194,56 +155,44 @@ def sim_switching_integral(x0, a3, T, dt, K, xi, tau, x_min, allow_switch=True):
     return t_s
 
 
-# =============================================================================
-# STEPS 3-4: off-policy integral-RL augmentation (Algorithm 1).
-#
-# FAIL-FIRST experiment (owner's call): pair a QUADRATIC critic with an odd,
-# cubic-capable actor and watch the critic fail, then diagnose. Only the critic
-# is "wrong" here, so any failure is attributable to it (controlled experiment).
-#
-# Parity (the rocket is odd-symmetric (th,thd)->(-th,-thd), cost even):
-#   V is EVEN -> phi_v has only even monomials.
-#   u~ is ODD -> phi_u has only odd monomials.
-# =============================================================================
+# Off-policy integral-RL augmentation (Algorithm 1). The system is odd-symmetric
+# ((th,thd) -> (-th,-thd), cost even), so V is even (phi_v has only even monomials)
+# and u~ is odd (phi_u has only odd monomials).
 
 def phi_v_quad(x):
-    # Quadratic critic -- the FAIL-FIRST diagnostic (kept for the quad-vs-quartic figure).
-    # V* here is NOT quadratic: the cubic drift a3*th^3 seeds quartic terms in the augmented
-    # HJB (Vx2*a3*th^3 -> th^4, th^3*thd), so a quadratic V leaves an unfittable residual at
-    # large theta. Demonstrated: resid 3.5e-2, garbage actor [0.09,-0.05,0.02]. See OBS-11.
+    # Quadratic critic. V* is actually NOT quadratic here -- the cubic drift seeds
+    # quartic terms in the augmented HJB -- so this basis leaves a residual at large
+    # theta. Kept only for the quad-vs-quartic comparison figure.
     th, thd = x
     return np.array([th**2, th*thd, thd**2])
 
 
 def phi_v(x):
-    # DEPLOYED CRITIC: quartic, even parity. Quadratic core + the two quartic terms the cubic
-    # drift sources (th^4, th^3*thd). th^3*thd is also the term whose d/d(thd) yields th^3 -- the
-    # critic term that generates the actor's cubic. Recovers resid 9.1e-3 (vs 3.5e-2 quadratic).
+    # Deployed critic: quadratic core plus the two quartic terms the cubic drift
+    # sources (th^4, th^3*thd), which fits V* cleanly (residual ~4x lower than quadratic).
     th, thd = x
     return np.array([th**2, th*thd, thd**2, th**4, th**3 * thd])
 
 
 def phi_u(x):
-    # ACTOR basis for u~(x). Odd parity, cubic-capable so it is NOT the
-    # bottleneck: linear part recovers K_tilde_lin near origin, th^3 counters
-    # the cubic aero moment.
+    # Actor basis: odd, cubic-capable. Linear part recovers K_tilde_lin near the
+    # origin; th^3 counters the cubic aero moment.
     th, thd = x
     return np.array([th, thd, th**3])
 
 
 def collect_data(x_start, a3, T_PE, dt, K, amp, stabilize=False, freqs=None, phase=2.3):
-    """Separate exploratory rollout (OBS-3 architecture). Run the TRUE plant under a behavior
-    policy, recording the state and the behavior AUGMENTATION (the part on top of u_m=-Kx).
-    Off-policy IRL lets the learning data come from this dedicated run.
+    """Exploratory rollout on the true plant under a behavior policy, recording state
+    and the behavior augmentation (the part on top of u_m = -Kx) for off-policy IRL.
 
-    behavior augmentation:
-      stabilize=False : ut = probe                 (model-based behavior u = -Kx + probe)
-      stabilize=True  : ut = -(a3/b)*theta^3 + probe  (rough cubic FEEDFORWARD + probe)
+    stabilize=False: ut = probe (model-based behavior u = -Kx + probe)
+    stabilize=True:  ut = -(a3/b)*theta^3 + probe (rough cubic feedforward + probe)
 
-    CAVEAT (control-authority tension, OBS-11): with stabilize=False the model-based -Kx cannot
-    hold large theta (cliff ~|theta|=0.48 at a3=60) -- the very instability the augmentation
-    exists to fix -- so the cubic is barely excitable. stabilize=True cancels the cubic so the
-    plant is ~linear+stable and large-theta data is reachable (DEBT: the feedforward 'knows' a3)."""
+    With stabilize=False, -Kx alone can't hold large theta (it diverges around
+    |theta|~0.48 at a3=60), so the cubic is barely excitable there; stabilize=True
+    cancels the cubic to reach large-theta data at the cost of the feedforward
+    already "knowing" a3.
+    """
     if freqs is None:
         freqs = np.array([1.0, 2.3, 3.7, 5.1, 7.9, 11.3])
 
@@ -278,12 +227,10 @@ def collect_data(x_start, a3, T_PE, dt, K, amp, stabilize=False, freqs=None, pha
 
 
 def build_regression(segments, w_u_i, W, R_scalar, dt):
-    # Off-policy IRL regression (ported from perturbed-oscillator.py, parameterized n_v/n_u).
-    # `segments` is a list of (X, U) rollouts; rows are built WITHIN each segment so a Bellman
-    # window never straddles two trajectories. This is what lets us learn from MULTIPLE
-    # moderate-theta initial conditions at once -- the unbiased-fit fix (OBS-12): one fat
-    # large-theta rollout is poison (target policy can't stabilize there -> V undefined), while
-    # several moderate, stabilizable rollouts pin both the linear gain and the cubic cleanly.
+    # Off-policy IRL regression. `segments` is a list of (X, U) rollouts; windows are
+    # built within each segment so a Bellman window never straddles two trajectories.
+    # This lets us learn from several moderate-theta ICs at once instead of one large
+    # rollout, which is unstable to fit since the target policy can't stabilize there.
     n_u = len(phi_u(segments[0][0][0]))
     rows, costs = [], []
     for X_data, U_data in segments:
@@ -329,11 +276,9 @@ def policy_iteration(segments, W, dt, eps=1e-6, max_iter=80):
     return w_u_i, w_v, history, diag
 
 
-# Deployed learning recipe (the robust, well-conditioned config from the OBS-12 robustness
-# sweep): several MODERATE-theta initial conditions under plain model-based behavior (-Kx +
-# probe, NO a3-feedforward). max|theta| ~ 0.46 stays in the stabilizable region, so the target
-# policy's value function exists and the fit is clean: linear part ~5-7% from -K_tilde_lin,
-# cubic ~ -3.7 (counters the aero cubic). cond flags bad draws (probe/IC choices -> ~5e6).
+# Deployed learning recipe: several moderate-theta ICs under plain model-based
+# behavior (-Kx + probe, no feedforward). max|theta| ~0.46 stays in the stabilizable
+# region, so the fit is clean: linear part within ~5-7% of -K_tilde_lin, cubic ~-3.7.
 LEARN_ICS = [0.2, 0.3, 0.4, 0.45, -0.35]
 LEARN_AMP = 0.15
 LEARN_W   = 10
